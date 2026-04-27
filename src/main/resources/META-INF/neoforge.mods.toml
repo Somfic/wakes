@@ -14,7 +14,7 @@ ships and vanilla boats — they rock with the swell instead of sitting flat.
 '''
 
 [[mixins]]
-config = "wakes.mixins.json"
+config = "wherestherum.mixins.json"
 
 [[dependencies.wakes]]
 modId = "neoforge"

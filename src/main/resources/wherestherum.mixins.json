@@ -1,0 +1,25 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "sh.somfic.wherestherum.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "plugin": "sh.somfic.wherestherum.WakesMixinPlugin",
+  "refmap": "wherestherum.refmap.json",
+  "mixins": [
+    "sable.ServerSubLevelMixin"
+  ],
+  "client": [
+    "PropellerBearingContraptionEntityMixin",
+    "vanilla.BoatRendererMixin",
+    "sodium.ChunkShaderOptionsMixin",
+    "sodium.ShaderLoaderMixin",
+    "sodium.DefaultShaderInterfaceMixin",
+    "sable.ClientSubLevelMixin",
+    "iris.ProgramSetMixin",
+    "iris.ProgramSourceMixin"
+  ],
+  "server": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

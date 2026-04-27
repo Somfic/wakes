@@ -23,8 +23,8 @@ jar: build
 # Copy the built jar to a target mods folder, e.g. `just install ~/minecraft/mods`
 install dest: build
     @mkdir -p "{{dest}}"
-    cp build/libs/wakes-*.jar "{{dest}}/"
-    @ls -lh "{{dest}}"/wakes-*.jar
+    cp build/libs/wherestherum-*.jar "{{dest}}/"
+    @ls -lh "{{dest}}"/wherestherum-*.jar
 
 # Run a NeoForge dev client with the mod loaded
 run-client:
