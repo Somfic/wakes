@@ -1,0 +1,88 @@
+plugins {
+    id 'java-library'
+    id 'eclipse'
+    id 'idea'
+    id 'net.neoforged.moddev' version '1.0.21'
+}
+
+version = mod_version
+group = mod_group_id
+base.archivesName = mod_id
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+repositories {
+    mavenLocal()
+    maven { url = 'https://maven.createmod.net' }
+    maven { url = 'https://maven.tterrag.com/' }
+    maven { url = 'https://maven.blamejared.com/' }
+    maven { url = 'https://maven.theillusivec4.top/' }
+}
+
+neoForge {
+    version = neo_version
+
+    runs {
+        configureEach {
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+            systemProperty 'forge.logging.console.level', 'debug'
+        }
+        client { client() }
+        server { server() }
+        data { data() }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet sourceSets.main
+        }
+    }
+
+    accessTransformers {
+        publish project.file('src/main/resources/META-INF/accesstransformer.cfg')
+    }
+}
+
+dependencies {
+    // Compile-only references to the bundled mod jars and anything dropped into libs/.
+    // You MUST provide a matching Create jar (e.g. create-1.21.1-6.0.4-19.jar) in libs/
+    // — Aeronautics extends Create's contraption types, so the mixin needs Create
+    // on the compile classpath. Physics Mod is reflective at runtime, so its jar is
+    // optional for compile but useful for IDE navigation.
+    compileOnly fileTree(dir: '.', include: ['*.jar'])
+    compileOnly fileTree(dir: 'libs', include: ['*.jar'])
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+}
+
+processResources {
+    def replaceProperties = [
+            minecraft_version: minecraft_version,
+            neo_version      : neo_version,
+            mod_id           : mod_id,
+            mod_name         : mod_name,
+            mod_version      : mod_version,
+            mod_license      : mod_license,
+            mod_authors      : mod_authors
+    ]
+    inputs.properties replaceProperties
+    filesMatching(['META-INF/neoforge.mods.toml', 'pack.mcmeta']) {
+        expand replaceProperties
+    }
+}
+
+jar {
+    manifest {
+        attributes([
+                'Specification-Title'     : mod_id,
+                'Specification-Vendor'    : mod_authors,
+                'Specification-Version'   : '1',
+                'Implementation-Title'    : project.name,
+                'Implementation-Version'  : project.jar.archiveVersion,
+                'Implementation-Vendor'   : mod_authors
+        ])
+    }
+}

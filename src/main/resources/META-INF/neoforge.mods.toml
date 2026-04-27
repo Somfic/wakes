@@ -1,0 +1,54 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "${mod_license}"
+issueTrackerURL = "https://github.com/somfic/wakes/issues"
+
+[[mods]]
+modId = "${mod_id}"
+version = "${mod_version}"
+displayName = "${mod_name}"
+authors = "${mod_authors}"
+description = '''
+Bridges Physics Mod's ocean waves into Create Aeronautics, so propeller-bearing
+contraptions visually rock with the swell instead of sitting on a flat plane.
+'''
+
+[[mixins]]
+config = "wakes.mixins.json"
+
+[[dependencies.wakes]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.0,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.wakes]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1,1.22)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.wakes]]
+modId = "create"
+type = "required"
+versionRange = "[6.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.wakes]]
+modId = "aeronautics"
+type = "required"
+versionRange = "[1.1.3,)"
+ordering = "AFTER"
+side = "BOTH"
+
+# Sodium is optional; when present, we patch its water shader. When absent the
+# vanilla water shader path is used.
+[[dependencies.wakes]]
+modId = "sodium"
+type = "optional"
+versionRange = "[0.6,0.7)"
+ordering = "AFTER"
+side = "CLIENT"

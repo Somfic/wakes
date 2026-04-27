@@ -1,0 +1,19 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.wakes.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "plugin": "dev.wakes.WakesMixinPlugin",
+  "refmap": "wakes.refmap.json",
+  "mixins": [],
+  "client": [
+    "PropellerBearingContraptionEntityMixin",
+    "sodium.ChunkShaderOptionsMixin",
+    "sodium.ShaderLoaderMixin",
+    "sodium.DefaultShaderInterfaceMixin"
+  ],
+  "server": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
