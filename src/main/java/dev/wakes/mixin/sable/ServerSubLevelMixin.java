@@ -2,6 +2,7 @@ package dev.wakes.mixin.sable;
 
 import dev.wakes.Wakes;
 import dev.wakes.WakesConfig;
+import dev.wakes.wave.WakesDepth;
 import dev.ryanhcode.sable.api.physics.force.ForceGroup;
 import dev.ryanhcode.sable.api.physics.force.ForceGroups;
 import dev.ryanhcode.sable.api.physics.force.QueuedForceGroup;
@@ -77,6 +78,12 @@ public abstract class ServerSubLevelMixin {
      *  sharper response to chop, larger = smoother response to long swells. */
     private static final double GRADIENT_EPS = 0.6;
 
+    /** Angular damping coefficient. Applies -ω × ANG_DAMPING × dt as a counter-torque
+     *  each tick, which converts to roughly an exponential decay of angular velocity
+     *  with time constant ~1/ANG_DAMPING seconds. 0 = no damping (free spin),
+     *  3-6 = realistic ship feel, >10 = sluggish. */
+    private static final double ANG_DAMPING = 4.0;
+
     // Reuse Sable's registered LEVITATION group rather than creating our own.
     // A custom in-memory ForceGroup record has no registry ID, so when the
     // simulated:diagram_data network packet tries to encode it for the F3 force
@@ -122,8 +129,14 @@ public abstract class ServerSubLevelMixin {
         double time = level.getGameTime() + system.getPartialPhysicsTick();
         float partial = (float) system.getPartialPhysicsTick();
         float weather = Math.min(1.5f, level.getRainLevel(partial) + level.getThunderLevel(partial) * 0.5f);
-        double swellAmp = 0.9 + weather * 1.4;
-        double chopAmp  = 0.05 + weather * 0.45;
+        // Depth-aware amplitude — calmer in shallows, full force in deep ocean.
+        // Sample at the ship's centre so we get one factor for the whole hull
+        // (cheap; per-sample depth lookup would be 9× the cost).
+        double cx = (bb.minX() + bb.maxX()) * 0.5;
+        double cz = (bb.minZ() + bb.maxZ()) * 0.5;
+        float depthFactor = WakesDepth.factorAt(level, cx, cz);
+        double swellAmp = (0.9 + weather * 1.4) * depthFactor;
+        double chopAmp  = (0.05 + weather * 0.45) * depthFactor;
 
         int n = Math.max(2, Math.min(5, WakesConfig.SAMPLE_POINTS_PER_AXIS.get()));
         double dx = (bb.maxX() - bb.minX()) / (n - 1);
@@ -190,6 +203,19 @@ public abstract class ServerSubLevelMixin {
 
         Vector3d vel = body.getLinearVelocity(new Vector3d());
         Vector3d angVel = body.getAngularVelocity(new Vector3d());
+
+        // Angular damping: counter-torque proportional to current angular velocity.
+        // Without this, every wave-induced tilt accumulates angular momentum that
+        // takes a long time to bleed off, so the ship spins more than it should.
+        // Pure torque, no linear component → use ForceTotal directly. Frame: angVel
+        // is in world frame from the pipeline; transform to body/plot frame to
+        // match what ForceTotal feeds back into the body.
+        if (ANG_DAMPING > 0) {
+            Vector3d angImpulseWorld = new Vector3d(angVel).mul(-ANG_DAMPING * dt);
+            Vector3d angImpulseLocal = new Vector3d();
+            pose.transformNormalInverse(angImpulseWorld, angImpulseLocal);
+            group.getForceTotal().applyAngularImpulse(angImpulseLocal);
+        }
 
         // Magenta dust at the COM in world coords to verify our reference point.
         if (debug) {

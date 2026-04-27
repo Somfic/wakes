@@ -16,6 +16,7 @@ public final class WakesTime {
     private static volatile double camY = 0.0;
     private static volatile double camZ = 0.0;
     private static volatile float weather = 0f;
+    private static volatile float depthFactor = 1f;
 
     private WakesTime() {}
 
@@ -32,4 +33,8 @@ public final class WakesTime {
     /** 0.0 = clear, 1.0 = full storm. Modulates wave amplitude in the shader. */
     public static void setWeather(float w) { weather = w; }
     public static float getWeather() { return weather; }
+
+    /** 0.0 = shallow shore (no waves), 1.0 = deep ocean (full waves). */
+    public static void setDepthFactor(float d) { depthFactor = d; }
+    public static float getDepthFactor() { return depthFactor; }
 }

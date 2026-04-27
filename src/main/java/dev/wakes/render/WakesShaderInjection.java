@@ -26,6 +26,18 @@ public final class WakesShaderInjection {
 uniform float u_WakesTime;
 uniform vec3  u_WakesCameraPos;
 uniform float u_WakesWeather;   // 0 calm .. 1.5 thunderstorm
+uniform float u_WakesDepth;     // fallback when outside depth-map range
+uniform sampler2D u_WakesDepthMap;
+uniform vec2  u_WakesDepthMapOrigin;
+uniform float u_WakesDepthMapRange;
+
+float wakes_depthAt(vec2 worldXZ) {
+    vec2 uv = (worldXZ - u_WakesDepthMapOrigin) / u_WakesDepthMapRange;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        return u_WakesDepth;   // fallback for vertices outside our window
+    }
+    return texture(u_WakesDepthMap, uv).r;
+}
 
 // Big swell — base ocean motion. Damped sum-of-sines, rotating direction.
 float wakes_swell(vec2 p) {
@@ -72,8 +84,9 @@ float wakes_chop(vec2 p) {
 }
 
 float wakes_waveHeight(vec2 p) {
-    float swellAmp = 0.9 + u_WakesWeather * 1.4;       // calm 0.9 .. storm 3.0
-    float chopAmp  = 0.05 + u_WakesWeather * 0.45;     // small in clear, real bite in storm
+    float depth = wakes_depthAt(p);
+    float swellAmp = (0.9 + u_WakesWeather * 1.4) * depth;
+    float chopAmp  = (0.05 + u_WakesWeather * 0.45) * depth;
     float h = wakes_swell(p) * swellAmp;
     h += wakes_chop(p) * chopAmp;
     return h;

@@ -1,7 +1,9 @@
 package dev.wakes.client;
 
 import dev.wakes.Wakes;
+import dev.wakes.render.WakesDepthTexture;
 import dev.wakes.render.WakesTime;
+import dev.wakes.wave.WakesDepth;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.level.Level;
@@ -37,5 +39,11 @@ public final class WakesClientEvents {
         float rain = level.getRainLevel(partial);
         float thunder = level.getThunderLevel(partial);
         WakesTime.setWeather(Math.min(1.5f, rain + thunder * 0.5f));
+
+        // Fallback depth at the camera position — used when a vertex falls outside
+        // the depth-texture coverage range. The real per-vertex depth comes from
+        // u_WakesDepthMap (rasterized & uploaded by WakesDepthTexture).
+        WakesTime.setDepthFactor(WakesDepth.factorAt(level, p.x, p.z));
+        WakesDepthTexture.refreshIfNeeded();
     }
 }
