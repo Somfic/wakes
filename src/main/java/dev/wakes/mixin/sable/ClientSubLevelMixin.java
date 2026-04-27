@@ -37,6 +37,10 @@ public abstract class ClientSubLevelMixin {
             cancellable = true,
             require = 0)
     private void wakes$applyWaveTransform(float partialTick, CallbackInfoReturnable<Pose3dc> cir) {
+        // Disabled: real physics now moves the SubLevel via ServerSubLevelMixin,
+        // so the rendered pose is already at the correct wave-displaced position.
+        // Adding a visual transform on top would double-bob.
+        if (true) return;
         if (!WakesConfig.ENABLED.get()) return;
         Pose3dc original = cir.getReturnValue();
         if (original == null) return;

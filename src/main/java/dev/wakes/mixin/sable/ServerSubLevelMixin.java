@@ -5,8 +5,8 @@ import dev.wakes.WakesConfig;
 import dev.ryanhcode.sable.api.physics.force.ForceGroup;
 import dev.ryanhcode.sable.api.physics.force.QueuedForceGroup;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
+import dev.ryanhcode.sable.api.physics.mass.MassData;
 import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
-import dev.ryanhcode.sable.companion.math.Pose3dc;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.core.BlockPos;
@@ -15,62 +15,71 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
 import org.joml.Vector3d;
+import org.joml.Vector3dc;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Real wave-driven buoyancy for Sable SubLevels (Aeronautics' physics-assembled
- * ships). Sable's existing FloatingBlockController already applies flat-water
- * buoyancy that holds the ship at sea level; we add a per-tick *delta* impulse at
- * a grid of hull-bottom sample points proportional to the wave-displacement of
- * the water surface above (or below) flat sea level.
+ * Real wave-driven buoyancy for Sable SubLevels.
  *
- * Net effect: the existing baseline keeps the ship floating; our delta makes it
- * rock with the wave field — heaving on swells, tilting toward troughs, getting
- * thrown around in storms.
+ * Pattern mirrors Aeronautics' propeller-bearing actor (which works without
+ * destroying the body). Critical learning from decompiled Sable source:
  *
- * Server-side only: physics happens on the server, then state replicates to the
- * client which renders it.
+ * - {@code QueuedForceGroup.applyAndRecordPointForce(point, force)} feeds into
+ *   {@code ForceTotal.applyImpulseAtPoint(massTracker, point, force)}, which
+ *   computes torque as {@code (point - COM) × force}. So {@code point} MUST be
+ *   in the same coordinate frame as {@code MassTracker.getCenterOfMass()}.
+ *
+ * - That frame is the SubLevel's PLOT frame — actual world BlockPos values
+ *   inside the plot region (chunks ~10000+), NOT the original world coords
+ *   where the player built the ship and NOT pose-local. Earlier attempts that
+ *   used pose-local coords saw {@code position - COM} produce ~160000-block
+ *   phantom offsets and runaway torques.
+ *
+ * - Pure linear heave (no torque) is achieved by passing the COM itself as the
+ *   application point: {@code (COM - COM) × force = 0 × force = 0}. Avoids
+ *   needing to know any block positions.
+ *
+ * Tick order in {@link ServerSubLevel}:
+ *   1. {@code prePhysicsTickBegin()} resets queued force groups.
+ *   2. {@code prePhysicsTick()} runs actors (e.g. propellers calling
+ *      {@code applyAndRecordPointForce} on PROPULSION group) + applies
+ *      direct lift/drag/buoyancy via {@code handle.applyLinearAndAngularImpulse}.
+ *   3. {@code applyQueuedForces()} iterates groups and applies each via
+ *      {@code handle.applyForcesAndReset(group.forceTotal)}.
+ *
+ * We hook {@code prePhysicsTick} TAIL — same window as the propeller actors,
+ * so our forces are queued and then applied by step 3.
  */
 @Mixin(value = ServerSubLevel.class, remap = false)
 public abstract class ServerSubLevelMixin {
 
-    /** Vanilla overworld sea level. Configurable later if user has custom sea level. */
     private static final double SEA_LEVEL = 63.0;
 
-    /** Direct gain on wave height. force = wave * GAIN * area.
-     *  Sable's own flat-water buoyancy holds the ship at sea level; we just
-     *  nudge it up when wave crests are over us, down in troughs. No spring,
-     *  no target tracking — those were fighting Sable and triggering its
-     *  collision-swept-bounds sanity check. */
-    private static final double WAVE_GAIN = 0.4;
+    /** Per-second buoyancy force gain on wave height, before multiplying by dt
+     *  (Sable's force API takes IMPULSES = force × dt, like the propeller does). */
+    private static final double WAVE_GAIN = 1.5;
 
-    /** Hard cap on the central force magnitude. */
-    private static final double MAX_FORCE = 1.5;
+    /** Hard cap on per-tick impulse magnitude (post-dt-multiplication). */
+    private static final double MAX_IMPULSE = 0.4;
 
-    /** Stable identity for the queued force group — Sable indexes by ForceGroup record equality. */
     private static final ForceGroup WAKES_FORCE_GROUP = new ForceGroup(
         Component.literal("Wakes — wave buoyancy"),
-        Component.literal("Per-sample wave-driven buoyancy delta on top of Sable's flat-water float"),
+        Component.literal("Wave-driven buoyancy delta on top of Sable's flat-water float"),
         0x3399ff,
         true
     );
 
     @Inject(
-        method = "applyQueuedForces(Ldev/ryanhcode/sable/sublevel/system/SubLevelPhysicsSystem;Ldev/ryanhcode/sable/api/physics/handle/RigidBodyHandle;D)V",
-        at = @At("HEAD"),
+        method = "prePhysicsTick(Ldev/ryanhcode/sable/sublevel/system/SubLevelPhysicsSystem;Ldev/ryanhcode/sable/api/physics/handle/RigidBodyHandle;D)V",
+        at = @At("TAIL"),
         require = 1
     )
     private void wakes$applyWaveBuoyancy(SubLevelPhysicsSystem system, RigidBodyHandle body, double dt, CallbackInfo ci) {
-        // Disabled: Sable's force pipeline does not gracefully accept external
-        // mods adding force groups. Every variant we tried either no-ops or
-        // destroys the rigid body. Visual bobbing happens in ClientSubLevelMixin.
-        if (true) return;
         if (!WakesConfig.ENABLED.get()) return;
         if (body == null || !body.isValid()) return;
-        wakes$logOnce("prePhysicsTick inject firing — body valid, dt=" + dt);
 
         ServerSubLevel self = (ServerSubLevel) (Object) this;
         ServerLevel level = self.getLevel();
@@ -79,94 +88,51 @@ public abstract class ServerSubLevelMixin {
         BoundingBox3dc bb = self.boundingBox();
         if (bb == null) return;
 
-        // Don't touch ships that aren't near the water surface. Two gates:
-        //   1. Hull bottom must be within a few blocks of sea level (skip flying / sky).
-        //   2. There must actually be water under the footprint at sea level.
-        // Without (1) we'd fight gravity during free-fall from height — pulling a
-        // raft down hard from y=200 trips Sable's "extreme Y range" sanity check.
-        // Only gate on the UPPER bound — a ship that's been pushed deep under needs
-        // the spring to lift it back. Engaging force on a free-falling ship from
-        // 200m up would be wrong (handled by gravity), but anything below sea
-        // level is fair game.
-        double hullBottom = bb.minY();
-        double maxAmp = 3.0;
-        if (hullBottom > SEA_LEVEL + maxAmp + 2.0) {
-            wakes$logOnce("hull at Y=" + hullBottom + " — too high above water, skipping");
-            return;
-        }
-        if (!overlapsAnyWater(level, bb)) {
-            wakes$logOnce("bb=" + bb.minX() + "," + bb.minY() + "," + bb.minZ() + ".." + bb.maxX() + "," + bb.maxY() + "," + bb.maxZ() + " — no water under footprint");
-            return;
-        }
+        // Skip ships that aren't near the water surface (no upper bound on how
+        // submerged because we want push-up for sunk ships; only skip free-flying).
+        if (bb.minY() > SEA_LEVEL + 5.0) return;
+        if (!overlapsAnyWater(level, bb)) return;
 
+        // CRITICAL: COM and force-point must be in the SAME frame. We apply at
+        // exactly the COM → zero offset → zero torque arm → pure heave.
+        MassData massData = self.getMassTracker();
+        if (massData == null) return;
+        Vector3dc com = massData.getCenterOfMass();
+        if (com == null) return;
+
+        // Sample wave height at the ship's REAL world center (not plot coords).
+        // The wave field is parametric in real-world (x, z, t).
+        double centerX = (bb.minX() + bb.maxX()) * 0.5;
+        double centerZ = (bb.minZ() + bb.maxZ()) * 0.5;
         double time = level.getGameTime();
-        // Mirror the client shader's amplitude scaling so visuals & physics agree.
         float weather = Math.min(1.5f, level.getRainLevel(0f) + level.getThunderLevel(0f) * 0.5f);
         double swellAmp = 0.9 + weather * 1.4;
         double chopAmp  = 0.05 + weather * 0.45;
-
-        int n = Math.max(2, Math.min(5, WakesConfig.SAMPLE_POINTS_PER_AXIS.get()));
-        double dx = (bb.maxX() - bb.minX()) / (n - 1);
-        double dz = (bb.maxZ() - bb.minZ()) / (n - 1);
-        // Effective surface "area" each sample stands in for — buoyancy scales with it.
-        double sampleArea = ((bb.maxX() - bb.minX()) * (bb.maxZ() - bb.minZ())) / (n * n);
-
-        Pose3dc pose = self.logicalPose();
-        Vector3d vel = body.getLinearVelocity(new Vector3d());
-
-        QueuedForceGroup group = self.getOrCreateQueuedForceGroup(WAKES_FORCE_GROUP);
-
-        // Sample wave height at the ship's xz centre.
-        double centerX = (bb.minX() + bb.maxX()) * 0.5;
-        double centerZ = (bb.minZ() + bb.maxZ()) * 0.5;
         double wave = waveHeightServer(centerX, centerZ, time, swellAmp, chopAmp);
 
-        // Force scales with footprint area so big rafts get proportional push.
-        double totalArea = (bb.maxX() - bb.minX()) * (bb.maxZ() - bb.minZ());
-        double rawForce = wave * WAVE_GAIN * totalArea;
-        double force = Math.max(-MAX_FORCE, Math.min(MAX_FORCE, rawForce));
+        double area = (bb.maxX() - bb.minX()) * (bb.maxZ() - bb.minZ());
+        // CRITICAL: multiply by dt (timestep). Sable's API takes impulses, not
+        // raw forces. Mirrors `prop.getScaledThrust() * timeStep` in the propeller.
+        double rawImpulse = wave * WAVE_GAIN * area * dt;
+        double impulse = Math.max(-MAX_IMPULSE, Math.min(MAX_IMPULSE, rawImpulse));
 
-        // Local frame: apply at pose origin (no torque), world-up transformed
-        // into local. Local coords were the only mode Sable didn't immediately
-        // teleport the body in earlier tests.
-        Vector3d worldForce = new Vector3d(0.0, force, 0.0);
-        Vector3d localForce = new Vector3d();
-        pose.transformNormalInverse(worldForce, localForce);
-        Vector3d localPoint = new Vector3d(0.0, 0.0, 0.0);
-        // Use record-only — applyAndRecordPointForce was destructive. recordPointForce
-        // queues into Sable's pipeline for application at its preferred time, without
-        // mid-tick mutation of the body's force accumulator.
-        group.recordPointForce(localPoint, localForce);
+        // Apply at COM (zero offset → no torque). World-up impulse vector.
+        QueuedForceGroup group = self.getOrCreateQueuedForceGroup(WAKES_FORCE_GROUP);
+        Vector3d point = new Vector3d(com);
+        Vector3d impulseVec = new Vector3d(0.0, impulse, 0.0);
+        group.applyAndRecordPointForce(point, impulseVec);
 
-        var posPos = pose.position();
+        Vector3d vel = body.getLinearVelocity(new Vector3d());
         wakes$logOnce(String.format(
-            "force=%.3f bbY=%.2f..%.2f vy=%.3f wave=%.3f pos=(%.2f,%.2f,%.2f)",
-            force, bb.minY(), bb.maxY(), vel.y, wave,
-            posPos.x(), posPos.y(), posPos.z()));
+            "wave=%.3f impulse=%.4f area=%.2f bbY=%.2f..%.2f vy=%.3f COM=(%.1f,%.1f,%.1f)",
+            wave, impulse, area, bb.minY(), bb.maxY(), vel.y,
+            com.x(), com.y(), com.z()));
     }
 
-    @org.spongepowered.asm.mixin.Unique
-    private static final java.util.concurrent.ConcurrentHashMap<String, Long> wakes$lastLogByKey = new java.util.concurrent.ConcurrentHashMap<>();
-
-    @org.spongepowered.asm.mixin.Unique
-    private static void wakes$logOnce(String msg) {
-        // Key = first 24 chars so distinct callsites have independent throttles.
-        String key = msg.length() > 24 ? msg.substring(0, 24) : msg;
-        long now = System.currentTimeMillis();
-        Long prev = wakes$lastLogByKey.get(key);
-        if (prev != null && now - prev < 1000L) return;
-        wakes$lastLogByKey.put(key, now);
-        Wakes.LOG.info("[ServerSubLevel] {}", msg);
-    }
-
-    /**
-     * Server-side wave height matching the shader's {@code wakes_swell + wakes_chop}.
-     * Algorithm and constants kept in sync by hand — they're small enough that this
-     * is faster than refactoring WakesWaveFunction into shared parameterised helpers.
-     */
+    /** Server-side wave height — must stay numerically aligned with the GLSL in
+     *  WakesShaderInjection so visible waves and physics waves agree. */
     private static double waveHeightServer(double x, double z, double time,
                                             double swellAmp, double chopAmp) {
-        // --- Big swell (matches GLSL wakes_swell) ---
         final int   ITER       = 10;
         final double FREQ      = 4.5, SPEED = 1.6, WEIGHT_INIT = 0.85;
         final double FREQ_MULT = 1.21, SPEED_MULT = 1.07, ITER_INC = 12.0;
@@ -192,7 +158,6 @@ public abstract class ServerSubLevelMixin {
         }
         double swell = (height / sumW) * 2.0 - 1.0;
 
-        // --- Chop (matches GLSL wakes_chop) ---
         double tc = time * 0.18;
         double qx = x * 0.22, qz = z * 0.22;
         double chop = 0.5 * (
@@ -206,8 +171,6 @@ public abstract class ServerSubLevelMixin {
     private static boolean overlapsAnyWater(ServerLevel level, BoundingBox3dc bb) {
         int x0 = (int) Math.floor(bb.minX()), x1 = (int) Math.floor(bb.maxX());
         int z0 = (int) Math.floor(bb.minZ()), z1 = (int) Math.floor(bb.maxZ());
-        // Sample at the topmost water block (sea_level - 1) and one below, to be
-        // robust to slightly varying sea levels and to SubLevels floating high.
         int yTop = (int) Math.floor(SEA_LEVEL) - 1;
         BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
         for (int x = x0; x <= x1; x++) {
@@ -219,5 +182,18 @@ public abstract class ServerSubLevelMixin {
             }
         }
         return false;
+    }
+
+    @org.spongepowered.asm.mixin.Unique
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> wakes$lastLogByKey = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @org.spongepowered.asm.mixin.Unique
+    private static void wakes$logOnce(String msg) {
+        String key = msg.length() > 24 ? msg.substring(0, 24) : msg;
+        long now = System.currentTimeMillis();
+        Long prev = wakes$lastLogByKey.get(key);
+        if (prev != null && now - prev < 1000L) return;
+        wakes$lastLogByKey.put(key, now);
+        Wakes.LOG.info("[ServerSubLevel] {}", msg);
     }
 }
