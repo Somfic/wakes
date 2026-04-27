@@ -15,6 +15,7 @@ public final class WakesTime {
     private static volatile double camX = 0.0;
     private static volatile double camY = 0.0;
     private static volatile double camZ = 0.0;
+    private static volatile float weather = 0f;
 
     private WakesTime() {}
 
@@ -27,4 +28,8 @@ public final class WakesTime {
     public static float getCamX() { return (float) camX; }
     public static float getCamY() { return (float) camY; }
     public static float getCamZ() { return (float) camZ; }
+
+    /** 0.0 = clear, 1.0 = full storm. Modulates wave amplitude in the shader. */
+    public static void setWeather(float w) { weather = w; }
+    public static float getWeather() { return weather; }
 }

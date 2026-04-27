@@ -26,11 +26,14 @@ public abstract class DefaultShaderInterfaceMixin {
     private GlUniformFloat wakes$uniformTime;
     @Unique
     private GlUniformFloat3v wakes$uniformCam;
+    @Unique
+    private GlUniformFloat wakes$uniformWeather;
 
     @Inject(method = "<init>", at = @At("TAIL"))
     private void wakes$bindUniforms(ShaderBindingContext ctx, ChunkShaderOptions options, CallbackInfo ci) {
-        this.wakes$uniformTime = ctx.bindUniformOptional("u_WakesTime", GlUniformFloat::new);
-        this.wakes$uniformCam  = ctx.bindUniformOptional("u_WakesCameraPos", GlUniformFloat3v::new);
+        this.wakes$uniformTime    = ctx.bindUniformOptional("u_WakesTime", GlUniformFloat::new);
+        this.wakes$uniformCam     = ctx.bindUniformOptional("u_WakesCameraPos", GlUniformFloat3v::new);
+        this.wakes$uniformWeather = ctx.bindUniformOptional("u_WakesWeather", GlUniformFloat::new);
     }
 
     @Inject(method = "setupState", at = @At("TAIL"))
@@ -40,6 +43,9 @@ public abstract class DefaultShaderInterfaceMixin {
         }
         if (this.wakes$uniformCam != null) {
             this.wakes$uniformCam.set(WakesTime.getCamX(), WakesTime.getCamY(), WakesTime.getCamZ());
+        }
+        if (this.wakes$uniformWeather != null) {
+            this.wakes$uniformWeather.setFloat(WakesTime.getWeather());
         }
     }
 }

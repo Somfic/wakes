@@ -26,10 +26,16 @@ public final class WakesClientEvents {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_SKY) return;   // fires once per frame, before world geometry
         Level level = Minecraft.getInstance().level;
         if (level == null) return;
-        WakesTime.setTime(level.getGameTime()
-                + event.getPartialTick().getGameTimeDeltaPartialTick(true));
+        float partial = event.getPartialTick().getGameTimeDeltaPartialTick(true);
+        WakesTime.setTime(level.getGameTime() + partial);
         Camera cam = event.getCamera();
         Vec3 p = cam.getPosition();
         WakesTime.setCamera(p.x, p.y, p.z);
+
+        // Combine rain + thunder for storm intensity. Thunder bumps it past 1.0 so
+        // amplitude really jumps during an actual thunderstorm.
+        float rain = level.getRainLevel(partial);
+        float thunder = level.getThunderLevel(partial);
+        WakesTime.setWeather(Math.min(1.5f, rain + thunder * 0.5f));
     }
 }

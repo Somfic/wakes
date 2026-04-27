@@ -5,7 +5,9 @@
   "compatibilityLevel": "JAVA_21",
   "plugin": "dev.wakes.WakesMixinPlugin",
   "refmap": "wakes.refmap.json",
-  "mixins": [],
+  "mixins": [
+    "sable.ServerSubLevelMixin"
+  ],
   "client": [
     "PropellerBearingContraptionEntityMixin",
     "sodium.ChunkShaderOptionsMixin",
