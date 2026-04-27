@@ -2,6 +2,7 @@ package dev.wakes.render;
 
 import dev.wakes.ModCompat;
 import dev.wakes.Wakes;
+import dev.wakes.wave.WakesWaveGLSL;
 
 /**
  * Patches Sodium's chunk shaders with our wave-displacement code at source-load
@@ -20,115 +21,54 @@ public final class WakesShaderInjection {
     /** Marker that proves to debugging eyes the patch landed. */
     private static final String SENTINEL = "// --- wakes:injected ---";
 
-    private static final String VERTEX_HEADER_INJECTION = SENTINEL + """
-
-#ifdef IS_TRANSLUCENT
-uniform float u_WakesTime;
-uniform vec3  u_WakesCameraPos;
-uniform float u_WakesWeather;   // 0 calm .. 1.5 thunderstorm
-uniform float u_WakesDepth;     // fallback when outside depth-map range
-uniform sampler2D u_WakesDepthMap;
-uniform vec2  u_WakesDepthMapOrigin;
-uniform float u_WakesDepthMapRange;
-
-float wakes_depthAt(vec2 worldXZ) {
-    vec2 uv = (worldXZ - u_WakesDepthMapOrigin) / u_WakesDepthMapRange;
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
-        return u_WakesDepth;   // fallback for vertices outside our window
-    }
-    return texture(u_WakesDepthMap, uv).r;
-}
-
-// Big swell — base ocean motion. Damped sum-of-sines, rotating direction.
-float wakes_swell(vec2 p) {
-    const int   ITER         = 10;
-    const float FREQUENCY    = 4.5;   // slightly lower base freq -> longer wavelength
-    const float SPEED        = 1.6;
-    const float WEIGHT_INIT  = 0.85;
-    const float FREQ_MULT    = 1.21;
-    const float SPEED_MULT   = 1.07;
-    const float ITER_INC     = 12.0;
-    const float DRAG_MULT    = 0.052;
-    const float XZ_SCALE     = 0.035;
-    const float TIME_MULT    = 0.045;
-
-    float t = u_WakesTime * TIME_MULT;
-    vec2  pos = p * XZ_SCALE;
-    float angle = 0.0, freq = FREQUENCY, speed = SPEED, weight = WEIGHT_INIT;
-    float height = 0.0, sumW = 0.0;
-    for (int i = 0; i < ITER; i++) {
-        vec2 dir = vec2(sin(angle), cos(angle));
-        float phase = dot(dir, pos) * freq + t * speed;
-        float wave  = exp(sin(phase) - 1.0);
-        float dWave = wave * cos(phase);
-        pos    -= dir * dWave * weight * DRAG_MULT;
-        height += wave * weight;
-        sumW   += weight;
-        weight *= 0.82;
-        freq   *= FREQ_MULT;
-        speed  *= SPEED_MULT;
-        angle  += ITER_INC;
-    }
-    return (height / sumW) * 2.0 - 1.0;   // unit-ish, [-1, +1]
-}
-
-// High-frequency wind chop — only really visible during weather. Skipped on calm days.
-float wakes_chop(vec2 p) {
-    const float FREQ_A = 1.4, FREQ_B = 2.1;
-    float t = u_WakesTime * 0.18;
-    vec2 q = p * 0.22;
-    return 0.5 * (
-          sin(q.x * FREQ_A + q.y * 0.7 + t)
-        + sin(q.y * FREQ_B - q.x * 0.5 + t * 1.3)
-    );
-}
-
-float wakes_waveHeight(vec2 p) {
-    float depth = wakes_depthAt(p);
-    float swellAmp = (0.9 + u_WakesWeather * 1.4) * depth;
-    float chopAmp  = (0.05 + u_WakesWeather * 0.45) * depth;
-    float h = wakes_swell(p) * swellAmp;
-    h += wakes_chop(p) * chopAmp;
-    return h;
-}
-
-// Central-difference normal — analytic gradient on the iterated stack would be
-// painful and the eps cost is negligible vs. the ~12 trig calls already paid.
-vec3 wakes_normal(vec2 p) {
-    const float E = 0.6;
-    float hL = wakes_waveHeight(p - vec2(E, 0.0));
-    float hR = wakes_waveHeight(p + vec2(E, 0.0));
-    float hD = wakes_waveHeight(p - vec2(0.0, E));
-    float hU = wakes_waveHeight(p + vec2(0.0, E));
-    return normalize(vec3((hL - hR) / (2.0 * E), 1.0, (hD - hU) / (2.0 * E)));
-}
-
-// `pos` arrives in camera-relative space. Recover absolute world position so the
-// wave field is locked to the world (not dragged with the player), and so the
-// sea-level Y-clamp can compare to actual world Y. Translucent pass includes
-// stained glass / slime / ice — narrow by world Y to spare them.
-//
-// Out param `outShade` is a [0,1] lighting factor based on the wave normal vs a
-// fixed sun direction. Used to modulate v_Color so crests catch light.
-vec3 wakes_displace(vec3 pos, out float outShade) {
-    outShade = 1.0;
-    vec3 world = pos + u_WakesCameraPos;
-    float dist = abs(world.y - 63.0);
-    float falloff = 1.0 - smoothstep(2.0, 6.0, dist);
-    if (falloff <= 0.0) return pos;
-
-    pos.y += wakes_waveHeight(world.xz) * falloff;
-
-    // Lambert-ish: dot(normal, sun) remapped into a gentle [0.7, 1.3] band so we
-    // shade crests bright and troughs dim without crushing the existing tint.
-    vec3 n = wakes_normal(world.xz);
-    const vec3 SUN = normalize(vec3(0.4, 0.85, 0.3));
-    float ndl = max(dot(n, SUN), 0.0);
-    outShade = mix(1.0, 0.7 + ndl * 0.6, falloff);
-    return pos;
-}
-#endif
-""";
+    private static final String VERTEX_HEADER_INJECTION = SENTINEL + "\n"
+        + "#ifdef IS_TRANSLUCENT\n"
+        + "uniform float u_WakesTime;\n"
+        + "uniform vec3  u_WakesCameraPos;\n"
+        + "uniform float u_WakesWeather;\n"
+        + "uniform float u_WakesDepth;\n"
+        + "uniform sampler2D u_WakesDepthMap;\n"
+        + "uniform vec2  u_WakesDepthMapOrigin;\n"
+        + "uniform float u_WakesDepthMapRange;\n"
+        + "\n"
+        + "float wakes_depthAt(vec2 worldXZ) {\n"
+        + "    vec2 uv = (worldXZ - u_WakesDepthMapOrigin) / u_WakesDepthMapRange;\n"
+        + "    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {\n"
+        + "        return u_WakesDepth;\n"
+        + "    }\n"
+        + "    return texture(u_WakesDepthMap, uv).r;\n"
+        + "}\n"
+        + "\n"
+        + WakesWaveGLSL.SWELL_CHOP_FNS
+        + "\n"
+        + "// Convenience overload: pulls weather/depth from uniforms / depth-map.\n"
+        + "float wakes_waveHeight(vec2 worldXZ) {\n"
+        + "    return wakes_waveHeightAmp(worldXZ, u_WakesTime, u_WakesWeather, wakes_depthAt(worldXZ));\n"
+        + "}\n"
+        + "\n"
+        + "vec3 wakes_normal(vec2 p) {\n"
+        + "    const float E = 0.6;\n"
+        + "    float hL = wakes_waveHeight(p - vec2(E, 0.0));\n"
+        + "    float hR = wakes_waveHeight(p + vec2(E, 0.0));\n"
+        + "    float hD = wakes_waveHeight(p - vec2(0.0, E));\n"
+        + "    float hU = wakes_waveHeight(p + vec2(0.0, E));\n"
+        + "    return normalize(vec3((hL - hR) / (2.0 * E), 1.0, (hD - hU) / (2.0 * E)));\n"
+        + "}\n"
+        + "\n"
+        + "vec3 wakes_displace(vec3 pos, out float outShade) {\n"
+        + "    outShade = 1.0;\n"
+        + "    vec3 world = pos + u_WakesCameraPos;\n"
+        + "    float dist = abs(world.y - 63.0);\n"
+        + "    float falloff = 1.0 - smoothstep(2.0, 6.0, dist);\n"
+        + "    if (falloff <= 0.0) return pos;\n"
+        + "    pos.y += wakes_waveHeight(world.xz) * falloff;\n"
+        + "    vec3 n = wakes_normal(world.xz);\n"
+        + "    const vec3 SUN = normalize(vec3(0.4, 0.85, 0.3));\n"
+        + "    float ndl = max(dot(n, SUN), 0.0);\n"
+        + "    outShade = mix(1.0, 0.7 + ndl * 0.6, falloff);\n"
+        + "    return pos;\n"
+        + "}\n"
+        + "#endif\n";
 
     private static final String VERTEX_GL_POSITION_ORIGINAL =
         "gl_Position = u_ProjectionMatrix * u_ModelViewMatrix * vec4(position, 1.0);";

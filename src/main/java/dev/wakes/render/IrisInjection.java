@@ -1,6 +1,7 @@
 package dev.wakes.render;
 
 import dev.wakes.Wakes;
+import dev.wakes.wave.WakesWaveGLSL;
 
 /**
  * Patches a loaded Iris shader pack's water vertex shader to use our wave
@@ -24,64 +25,21 @@ public final class IrisInjection {
      *  starts with a "Complementary Shaders" comment header. */
     private static final String COMPLEMENTARY_MARKER = "Complementary";
 
-    /** GLSL wave block injected into the pack's gbuffers_water.vsh. Uses Iris
-     *  built-in uniforms ({@code cameraPosition}, {@code frameTimeCounter}) —
-     *  these are already declared by the pack's own include chain so we MUST
-     *  NOT redeclare them. */
-    private static final String WAVE_BLOCK = SENTINEL + """
-
-float wakes_swell(vec2 p) {
-    const int   ITER         = 10;
-    const float FREQUENCY    = 4.5;
-    const float SPEED        = 1.6;
-    const float WEIGHT_INIT  = 0.85;
-    const float FREQ_MULT    = 1.21;
-    const float SPEED_MULT   = 1.07;
-    const float ITER_INC     = 12.0;
-    const float DRAG_MULT    = 0.052;
-    const float XZ_SCALE     = 0.035;
-    const float TIME_MULT    = 0.045 * 20.0;   // frameTimeCounter is in seconds; we want ticks
-
-    float t = frameTimeCounter * TIME_MULT;
-    vec2  pos = p * XZ_SCALE;
-    float angle = 0.0, freq = FREQUENCY, speed = SPEED, weight = WEIGHT_INIT;
-    float height = 0.0, sumW = 0.0;
-    for (int i = 0; i < ITER; i++) {
-        vec2 dir = vec2(sin(angle), cos(angle));
-        float phase = dot(dir, pos) * freq + t * speed;
-        float wave  = exp(sin(phase) - 1.0);
-        float dWave = wave * cos(phase);
-        pos    -= dir * dWave * weight * DRAG_MULT;
-        height += wave * weight;
-        sumW   += weight;
-        weight *= 0.82;
-        freq   *= FREQ_MULT;
-        speed  *= SPEED_MULT;
-        angle  += ITER_INC;
-    }
-    return (height / sumW) * 2.0 - 1.0;
-}
-
-float wakes_chop(vec2 p) {
-    float t = frameTimeCounter * (0.18 * 20.0);
-    vec2 q = p * 0.22;
-    return 0.5 * (
-          sin(q.x * 1.4 + q.y * 0.7 + t)
-        + sin(q.y * 2.1 - q.x * 0.5 + t * 1.3)
-    );
-}
-
-float wakes_waveHeight(vec2 worldXZ) {
-    // Match the Sodium-path formula so visual amplitude is consistent between
-    // shaders-on and shaders-off. Iris built-in `rainStrength` (0..1) drives
-    // weather scaling. (No thunder distinction available as a built-in; close
-    // enough — thunderstorm waves will be ~30% smaller than Sodium's, fine.)
-    float weather = rainStrength;
-    float swellAmp = 0.9 + weather * 1.4;   // calm 0.9 .. storm 2.3
-    float chopAmp  = 0.05 + weather * 0.45;
-    return wakes_swell(worldXZ) * swellAmp + wakes_chop(worldXZ) * chopAmp;
-}
-""";
+    /** GLSL wave block injected into the pack's gbuffers_water.vsh. Pulls in
+     *  the central wave function from {@link WakesWaveGLSL} and adds an Iris
+     *  adapter that maps to its built-in uniforms ({@code cameraPosition},
+     *  {@code frameTimeCounter}, {@code rainStrength}). Iris reports time in
+     *  seconds; we convert to ticks (×20) to share the SAME wave-function
+     *  constants as the Sodium path. */
+    private static final String WAVE_BLOCK = SENTINEL + "\n\n"
+        + WakesWaveGLSL.SWELL_CHOP_FNS
+        + "\n"
+        + "// Iris adapter: derive `t` from frameTimeCounter, weather from rainStrength.\n"
+        + "// Depth tied to 1.0 (full ocean) — could be plumbed via custom uniform later.\n"
+        + "float wakes_waveHeight(vec2 worldXZ) {\n"
+        + "    float t = frameTimeCounter * 20.0;\n"
+        + "    return wakes_waveHeightAmp(worldXZ, t, rainStrength, 1.0);\n"
+        + "}\n";
 
     private IrisInjection() {}
 

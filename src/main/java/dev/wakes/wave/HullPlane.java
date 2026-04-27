@@ -39,7 +39,7 @@ public final class HullPlane {
         if (n == 1) {
             double cx = (footprint.minX + footprint.maxX) * 0.5;
             double cz = (footprint.minZ + footprint.maxZ) * 0.5;
-            double h = WakesWaveFunction.waveHeight(cx, cz, time);
+            double h = WakesWaveFunction.waveHeight(cx, cz, time, 0.0, 1.0);
             return new HullPlane(h, 0, 0);
         }
 
@@ -62,7 +62,7 @@ public final class HullPlane {
             for (int j = 0; j < n; j++) {
                 double z = footprint.minZ + j * dz - cz;
                 double zWorld = z + cz;
-                double h = WakesWaveFunction.waveHeight(xWorld, zWorld, time);
+                double h = WakesWaveFunction.waveHeight(xWorld, zWorld, time, 0.0, 1.0);
                 sxx += x * x;
                 szz += z * z;
                 sxz += x * z;

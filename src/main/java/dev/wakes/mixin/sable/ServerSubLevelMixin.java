@@ -3,6 +3,7 @@ package dev.wakes.mixin.sable;
 import dev.wakes.Wakes;
 import dev.wakes.WakesConfig;
 import dev.wakes.wave.WakesDepth;
+import dev.wakes.wave.WakesWaveFunction;
 import dev.ryanhcode.sable.api.physics.force.ForceGroup;
 import dev.ryanhcode.sable.api.physics.force.ForceGroups;
 import dev.ryanhcode.sable.api.physics.force.QueuedForceGroup;
@@ -135,8 +136,6 @@ public abstract class ServerSubLevelMixin {
         double cx = (bb.minX() + bb.maxX()) * 0.5;
         double cz = (bb.minZ() + bb.maxZ()) * 0.5;
         float depthFactor = WakesDepth.factorAt(level, cx, cz);
-        double swellAmp = (0.9 + weather * 1.4) * depthFactor;
-        double chopAmp  = (0.05 + weather * 0.45) * depthFactor;
 
         int n = Math.max(2, Math.min(5, WakesConfig.SAMPLE_POINTS_PER_AXIS.get()));
         double dx = (bb.maxX() - bb.minX()) / (n - 1);
@@ -160,7 +159,7 @@ public abstract class ServerSubLevelMixin {
             for (int j = 0; j < n; j++) {
                 double sx = bb.minX() + i * dx;
                 double sz = bb.minZ() + j * dz;
-                double wave = waveHeightServer(sx, sz, time, swellAmp, chopAmp);
+                double wave = WakesWaveFunction.waveHeight(sx, sz, time, weather, depthFactor);
 
                 double rawImpulse = wave * WAVE_GAIN * sampleArea * dt;
                 double impulse = Math.max(-MAX_IMPULSE, Math.min(MAX_IMPULSE, rawImpulse));
@@ -170,10 +169,10 @@ public abstract class ServerSubLevelMixin {
                 // objects in. Magnitude is the steepness, so steep crests drift
                 // ships harder than gentle swells.
                 double e = GRADIENT_EPS;
-                double hXp = waveHeightServer(sx + e, sz, time, swellAmp, chopAmp);
-                double hXm = waveHeightServer(sx - e, sz, time, swellAmp, chopAmp);
-                double hZp = waveHeightServer(sx, sz + e, time, swellAmp, chopAmp);
-                double hZm = waveHeightServer(sx, sz - e, time, swellAmp, chopAmp);
+                double hXp = WakesWaveFunction.waveHeight(sx + e, sz, time, weather, depthFactor);
+                double hXm = WakesWaveFunction.waveHeight(sx - e, sz, time, weather, depthFactor);
+                double hZp = WakesWaveFunction.waveHeight(sx, sz + e, time, weather, depthFactor);
+                double hZm = WakesWaveFunction.waveHeight(sx, sz - e, time, weather, depthFactor);
                 double gradX = (hXp - hXm) / (2.0 * e);
                 double gradZ = (hZp - hZm) / (2.0 * e);
                 double dragX = clamp(gradX * DRAG_GAIN * sampleArea * dt, MAX_IMPULSE);
@@ -252,44 +251,9 @@ public abstract class ServerSubLevelMixin {
         return Math.max(-cap, Math.min(cap, v));
     }
 
-    /** Server-side wave height — must stay numerically aligned with the GLSL in
-     *  WakesShaderInjection so visible waves and physics waves agree. */
-    private static double waveHeightServer(double x, double z, double time,
-                                            double swellAmp, double chopAmp) {
-        final int   ITER       = 10;
-        final double FREQ      = 4.5, SPEED = 1.6, WEIGHT_INIT = 0.85;
-        final double FREQ_MULT = 1.21, SPEED_MULT = 1.07, ITER_INC = 12.0;
-        final double DRAG_MULT = 0.052, XZ_SCALE = 0.035, TIME_MULT = 0.045;
-
-        double t = time * TIME_MULT;
-        double px = x * XZ_SCALE, pz = z * XZ_SCALE;
-        double angle = 0.0, freq = FREQ, speed = SPEED, weight = WEIGHT_INIT;
-        double height = 0.0, sumW = 0.0;
-        for (int i = 0; i < ITER; i++) {
-            double dxv = Math.sin(angle), dzv = Math.cos(angle);
-            double phase = (dxv * px + dzv * pz) * freq + t * speed;
-            double wave  = Math.exp(Math.sin(phase) - 1.0);
-            double dWave = wave * Math.cos(phase);
-            px -= dxv * dWave * weight * DRAG_MULT;
-            pz -= dzv * dWave * weight * DRAG_MULT;
-            height += wave * weight;
-            sumW   += weight;
-            weight *= 0.82;
-            freq   *= FREQ_MULT;
-            speed  *= SPEED_MULT;
-            angle  += ITER_INC;
-        }
-        double swell = (height / sumW) * 2.0 - 1.0;
-
-        double tc = time * 0.18;
-        double qx = x * 0.22, qz = z * 0.22;
-        double chop = 0.5 * (
-              Math.sin(qx * 1.4 + qz * 0.7 + tc)
-            + Math.sin(qz * 2.1 - qx * 0.5 + tc * 1.3)
-        );
-
-        return swell * swellAmp + chop * chopAmp;
-    }
+    // Wave-height calculation moved to dev.wakes.wave.WakesWaveFunction.
+    // Same formula is shared with the GLSL in WakesWaveGLSL via WakesShaderInjection
+    // (Sodium) and IrisInjection (shader packs).
 
     private static boolean overlapsAnyWater(ServerLevel level, BoundingBox3dc bb) {
         int x0 = (int) Math.floor(bb.minX()), x1 = (int) Math.floor(bb.maxX());
