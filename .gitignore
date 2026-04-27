@@ -8,3 +8,11 @@ _extracted/
 run/
 runs/
 libs/*.jar
+
+# direnv
+.direnv/
+.envrc
+
+# nix
+result
+result-*
