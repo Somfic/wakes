@@ -69,6 +69,14 @@ public abstract class ServerSubLevelMixin {
     /** Hard cap on per-tick impulse magnitude (post-dt-multiplication). */
     private static final double MAX_IMPULSE = 0.4;
 
+    /** Strength of the horizontal drift force pushing the ship along the wave's
+     *  surface tangent (in the wave-travel direction). 0 = pure heave, no drift. */
+    private static final double DRAG_GAIN = 1.5;
+
+    /** Sample epsilon for the wave-gradient finite difference (blocks). Smaller =
+     *  sharper response to chop, larger = smoother response to long swells. */
+    private static final double GRADIENT_EPS = 0.6;
+
     // Reuse Sable's registered LEVITATION group rather than creating our own.
     // A custom in-memory ForceGroup record has no registry ID, so when the
     // simulated:diagram_data network packet tries to encode it for the F3 force
@@ -133,9 +141,7 @@ public abstract class ServerSubLevelMixin {
         double maxAbsImpulse = 0;
         double totalImpulse = 0;
 
-        // Hardcoded ON for now — config is client-side, mixin runs server-side,
-        // so the toggle wouldn't reach us anyway. Remove particles once tuning's done.
-        boolean debug = true;
+        boolean debug = false;
 
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
@@ -145,16 +151,30 @@ public abstract class ServerSubLevelMixin {
 
                 double rawImpulse = wave * WAVE_GAIN * sampleArea * dt;
                 double impulse = Math.max(-MAX_IMPULSE, Math.min(MAX_IMPULSE, rawImpulse));
-                if (Math.abs(impulse) < 1e-5) continue;
+
+                // Wave gradient via central differences. Direction (∂h/∂x, ∂h/∂z)
+                // points UP the slope — the direction a wave is pushing floating
+                // objects in. Magnitude is the steepness, so steep crests drift
+                // ships harder than gentle swells.
+                double e = GRADIENT_EPS;
+                double hXp = waveHeightServer(sx + e, sz, time, swellAmp, chopAmp);
+                double hXm = waveHeightServer(sx - e, sz, time, swellAmp, chopAmp);
+                double hZp = waveHeightServer(sx, sz + e, time, swellAmp, chopAmp);
+                double hZm = waveHeightServer(sx, sz - e, time, swellAmp, chopAmp);
+                double gradX = (hXp - hXm) / (2.0 * e);
+                double gradZ = (hZp - hZm) / (2.0 * e);
+                double dragX = clamp(gradX * DRAG_GAIN * sampleArea * dt, MAX_IMPULSE);
+                double dragZ = clamp(gradZ * DRAG_GAIN * sampleArea * dt, MAX_IMPULSE);
+
+                if (Math.abs(impulse) < 1e-5 && Math.abs(dragX) < 1e-5 && Math.abs(dragZ) < 1e-5) continue;
 
                 // World-space hull-bottom sample point → plot-frame point.
                 worldPoint.set(sx, hullY, sz);
                 pose.transformPositionInverse(worldPoint, plotPoint);
 
-                // Force vector in WORLD frame (we want gravity-aligned buoyancy)
-                // → transform into body/plot frame so it stays world-up even when
-                // the ship tilts. Mirrors what ForceTotal accumulates as "local".
-                worldUp.set(0.0, impulse, 0.0);
+                // World-space combined force: vertical heave + horizontal drift.
+                // Then convert to body/plot frame so axes survive ship rotation.
+                worldUp.set(dragX, impulse, dragZ);
                 pose.transformNormalInverse(worldUp, localImpulse);
 
                 group.applyAndRecordPointForce(plotPoint, localImpulse);
@@ -181,10 +201,7 @@ public abstract class ServerSubLevelMixin {
             );
         }
 
-        wakes$logOnce(String.format(
-            "samples=%d/%d total=%.3f max=%.4f bbY=%.2f..%.2f vy=%.3f angV=(%.3f,%.3f,%.3f)",
-            applied, n*n, totalImpulse, maxAbsImpulse, bb.minY(), bb.maxY(), vel.y,
-            angVel.x, angVel.y, angVel.z));
+        // Logging silenced — re-enable wakes$logOnce(...) here if you need to debug.
     }
 
     /** Visualise per-sample force as a coloured dust particle: green for upward
@@ -203,6 +220,10 @@ public abstract class ServerSubLevelMixin {
         double dyShift = impulse > 0 ? 0.3 : -0.3;
         level.sendParticles(ParticleTypes.BUBBLE,
             x, y + dyShift, z, 1, 0, 0, 0, 0);
+    }
+
+    private static double clamp(double v, double cap) {
+        return Math.max(-cap, Math.min(cap, v));
     }
 
     /** Server-side wave height — must stay numerically aligned with the GLSL in
