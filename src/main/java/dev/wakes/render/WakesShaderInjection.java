@@ -1,5 +1,6 @@
 package dev.wakes.render;
 
+import dev.wakes.ModCompat;
 import dev.wakes.Wakes;
 
 /**
@@ -14,8 +15,7 @@ import dev.wakes.Wakes;
  */
 public final class WakesShaderInjection {
 
-    private static final String VERTEX_TARGET   = "blocks/block_layer_opaque.vsh";
-    private static final String FRAGMENT_TARGET = "blocks/block_layer_opaque.fsh";
+    private static final String VERTEX_TARGET = "blocks/block_layer_opaque.vsh";
 
     /** Marker that proves to debugging eyes the patch landed. */
     private static final String SENTINEL = "// --- wakes:injected ---";
@@ -148,18 +148,22 @@ v_Color = _vert_color * texture(u_LightTex, _vert_tex_light_coord);
     v_Color.rgb *= wakes_shade;
 #endif""";
 
-    /** Header only; fragment-stage just needs to know u_WakesTime exists if it ever wants it. */
     private static final String INJECTED_WAVE_FN = "wakes_displace";
 
     private WakesShaderInjection() {}
 
     public static String maybePatch(String path, String source) {
         if (source.contains(SENTINEL)) return source;   // already patched (recursion guard)
+        // Skip Sodium patching only when Iris has a shader pack ACTIVE — in that
+        // case Iris owns the chunk shader pipeline and our injection is dead.
+        // When Iris is installed but no pack is loaded, Sodium still renders, so
+        // we want to patch as normal.
+        if (ModCompat.irisShadersActive()) return source;
 
         if (path.endsWith(VERTEX_TARGET)) {
             return patchVertex(source);
         }
-        // Fragment stage left untouched for now — wave colouring/normals can come later.
+        // Fragment shader intentionally untouched — keeps the look vanilla-MC-aligned.
         return source;
     }
 

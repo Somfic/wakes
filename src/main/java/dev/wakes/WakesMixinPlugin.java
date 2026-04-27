@@ -26,6 +26,9 @@ public class WakesMixinPlugin implements IMixinConfigPlugin {
         if (mixinClassName.contains(".sable.")) {
             return ModCompat.SABLE_LOADED;
         }
+        if (mixinClassName.contains(".iris.")) {
+            return ModCompat.IRIS_LOADED;
+        }
         return true;
     }
 }

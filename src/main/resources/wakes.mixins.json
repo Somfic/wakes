@@ -13,7 +13,9 @@
     "sodium.ChunkShaderOptionsMixin",
     "sodium.ShaderLoaderMixin",
     "sodium.DefaultShaderInterfaceMixin",
-    "sable.ClientSubLevelMixin"
+    "sable.ClientSubLevelMixin",
+    "iris.ProgramSetMixin",
+    "iris.ProgramSourceMixin"
   ],
   "server": [],
   "injectors": {

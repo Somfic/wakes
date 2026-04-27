@@ -60,3 +60,12 @@ type = "optional"
 versionRange = "[1.1.3,)"
 ordering = "AFTER"
 side = "BOTH"
+
+# Iris is optional; when present we patch the loaded shader pack's water vsh
+# (Complementary supported, others fall through unmodified).
+[[dependencies.wakes]]
+modId = "iris"
+type = "optional"
+versionRange = "[1.8,1.9)"
+ordering = "AFTER"
+side = "CLIENT"
