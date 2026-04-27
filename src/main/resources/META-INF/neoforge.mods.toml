@@ -52,3 +52,11 @@ type = "optional"
 versionRange = "[0.6,0.7)"
 ordering = "AFTER"
 side = "CLIENT"
+
+# Sable powers Aeronautics' Physics Assembler. When present we bob assembled SubLevels.
+[[dependencies.wakes]]
+modId = "sable"
+type = "optional"
+versionRange = "[1.1.3,)"
+ordering = "AFTER"
+side = "BOTH"

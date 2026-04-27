@@ -10,7 +10,8 @@
     "PropellerBearingContraptionEntityMixin",
     "sodium.ChunkShaderOptionsMixin",
     "sodium.ShaderLoaderMixin",
-    "sodium.DefaultShaderInterfaceMixin"
+    "sodium.DefaultShaderInterfaceMixin",
+    "sable.ClientSubLevelMixin"
   ],
   "server": [],
   "injectors": {

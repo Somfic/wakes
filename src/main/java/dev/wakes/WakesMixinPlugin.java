@@ -23,6 +23,9 @@ public class WakesMixinPlugin implements IMixinConfigPlugin {
         if (mixinClassName.contains(".sodium.")) {
             return ModCompat.SODIUM_LOADED;
         }
+        if (mixinClassName.contains(".sable.")) {
+            return ModCompat.SABLE_LOADED;
+        }
         return true;
     }
 }
