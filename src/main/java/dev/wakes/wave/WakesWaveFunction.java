@@ -22,12 +22,25 @@ public final class WakesWaveFunction {
     private static final double XZ_SCALE     = 0.035;
     private static final double TIME_MULT    = 0.045;
 
+    // Global wind direction (unit vector). All three wave octaves rotate input
+    // coords so their dominant propagation axis aligns with this — gives the
+    // ocean a unified "this way" feel instead of looking like crossed swells
+    // from nowhere. Currently ~30° from +X (ENE).
+    private static final double WIND_DIR_X = 0.866;   // cos(30°)
+    private static final double WIND_DIR_Z = 0.5;     // sin(30°)
+
     private WakesWaveFunction() {}
 
     /** Big-swell component, returns roughly [-1, +1]. */
     public static double swell(double x, double z, double t) {
+        // Rotate input into wind-aligned frame: each octave's per-iteration
+        // direction is now expressed relative to the wind axis, so the bundle
+        // of 10 octaves drifts as a coherent wind-driven swell rather than
+        // sitting in random world directions.
+        double xR =  x * WIND_DIR_X + z * WIND_DIR_Z;
+        double zR = -x * WIND_DIR_Z + z * WIND_DIR_X;
         double scaledT = t * TIME_MULT;
-        double px = x * XZ_SCALE, pz = z * XZ_SCALE;
+        double px = xR * XZ_SCALE, pz = zR * XZ_SCALE;
         double angle = 0.0, freq = FREQUENCY, speed = SPEED, weight = WEIGHT_INIT;
         double height = 0.0, sumW = 0.0;
         for (int i = 0; i < ITER; i++) {
@@ -49,11 +62,28 @@ public final class WakesWaveFunction {
 
     /** High-frequency wind chop, returns roughly [-1, +1]. */
     public static double chop(double x, double z, double t) {
+        double xR =  x * WIND_DIR_X + z * WIND_DIR_Z;
+        double zR = -x * WIND_DIR_Z + z * WIND_DIR_X;
         double scaledT = t * 0.18;
-        double qx = x * 0.22, qz = z * 0.22;
+        double qx = xR * 0.22, qz = zR * 0.22;
         return 0.5 * (
               Math.sin(qx * 1.4 + qz * 0.7 + scaledT)
             + Math.sin(qz * 2.1 - qx * 0.5 + scaledT * 1.3)
+        );
+    }
+
+    /** Big rolling sub-swell. Two slow sines with wavelengths ~85–110 blocks
+     *  give long-period ocean rolls — bow and stern of a 50-block ship sit on
+     *  meaningfully different phases, producing real fore-aft pitch instead of
+     *  averaging out across short swell. Returns roughly [-1, +1]. */
+    public static double sub(double x, double z, double t) {
+        double xR =  x * WIND_DIR_X + z * WIND_DIR_Z;
+        double zR = -x * WIND_DIR_Z + z * WIND_DIR_X;
+        double scaledT = t * 0.07;
+        double qx = xR * 0.04, qz = zR * 0.04;
+        return 0.5 * (
+              Math.sin(qx * 1.2 + qz * 0.7 + scaledT)
+            + Math.sin(qz * 1.4 - qx * 0.9 + scaledT * 1.15)
         );
     }
 
@@ -65,8 +95,11 @@ public final class WakesWaveFunction {
      * @param depth   0 = shore, 1 = deep ocean
      */
     public static double waveHeight(double x, double z, double t, double weather, double depth) {
-        double swellAmp = (0.9 + weather * 1.4) * depth;
+        double subAmp   = (1.2 + weather * 1.6) * depth;
+        double swellAmp = (1.0 + weather * 1.4) * depth;
         double chopAmp  = (0.05 + weather * 0.45) * depth;
-        return swell(x, z, t) * swellAmp + chop(x, z, t) * chopAmp;
+        return sub(x, z, t)   * subAmp
+             + swell(x, z, t) * swellAmp
+             + chop(x, z, t)  * chopAmp;
     }
 }

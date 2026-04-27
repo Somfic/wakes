@@ -18,11 +18,14 @@ public final class WakesDepth {
     /** Sea level Y. Topmost water block is at SEA_LEVEL - 1 = 62 by default. */
     public static final int SEA_LEVEL = 63;
 
-    /** Depth at which we consider the water "deep enough" for full-amplitude waves. */
-    public static final int DEEP_DEPTH = 20;
+    /** Depth at which we consider the water "deep enough" for full-amplitude waves.
+     *  Open-ocean trenches at 30+ blocks get the full sub-swell; coastal / shelf
+     *  water in the teens gets a partial smoothstepped contribution. */
+    public static final int DEEP_DEPTH = 30;
 
-    /** Minimum depth required to register any wave at all. */
-    public static final int MIN_DEPTH = 2;
+    /** Minimum depth required to register any wave at all. Lakes, rivers, and
+     *  glassy shallows stay calm; from here it ramps up smoothly to DEEP_DEPTH. */
+    public static final int MIN_DEPTH = 8;
 
     private WakesDepth() {}
 

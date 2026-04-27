@@ -9,8 +9,8 @@ version = "${mod_version}"
 displayName = "${mod_name}"
 authors = "${mod_authors}"
 description = '''
-Bridges Physics Mod's ocean waves into Create Aeronautics, so propeller-bearing
-contraptions visually rock with the swell instead of sitting on a flat plane.
+Wave-driven buoyancy and matching ocean shader injection for Create Aeronautics
+ships and vanilla boats — they rock with the swell instead of sitting flat.
 '''
 
 [[mixins]]

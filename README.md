@@ -1,27 +1,17 @@
 # Wakes
 
-NeoForge 1.21.1 addon that bridges **Physics Mod**'s ocean waves into **Create Aeronautics**, so propeller-bearing contraptions visually rock with the swell instead of sitting on a flat plane.
-
-## Status
-
-**Phase 1 — visual-only.** Contraptions get heave + pitch + roll applied at render time, sampled at multiple hull points so a long ship rocks like a ship rather than bobbing like a cork. No effect on collisions, server-side physics, or buoyancy.
-
-Phase 2 (real wave-driven server physics) is planned but not implemented.
+NeoForge 1.21.1 mod that adds wave-driven buoyancy and matching ocean shaders so **Create Aeronautics** ships and vanilla boats rock with the swell instead of sitting on a flat plane.
 
 ## Build
 
-You need a **Create** jar matching your target version on the compile classpath. Drop it into `libs/`:
+The mixins compile against jars from Create, Create Aeronautics, Sable, Sodium, and Iris. Run:
 
 ```
-libs/
-  create-1.21.1-6.0.4-19.jar     # or whichever Create build matches Aeronautics
+just fetch-libs
+just build
 ```
 
-The bundled Create-Aeronautics jar (`create-aeronautics-bundled-1.21.1-1.1.3.jar`) and the Physics Mod jar (`physics-mod-3.0.27-mc-1.21.1-neoforge.jar`) at the repo root are referenced as `compileOnly`. Physics Mod is **reflective at runtime** — Wakes loads fine without it and degrades to a no-op.
-
-```
-./gradlew build
-```
+`fetch-libs` downloads the jars from Modrinth into `libs/` and extracts the jar-in-jars Gradle's fileTree can't see (Sable's companion-math classes, Veil). All `compileOnly` — runtime resolves them from the actual installed mods.
 
 ## Runtime requirements
 
@@ -30,7 +20,9 @@ The bundled Create-Aeronautics jar (`create-aeronautics-bundled-1.21.1-1.1.3.jar
 | NeoForge 21.1+ | yes | |
 | Create 6.0+ | yes | |
 | Create Aeronautics 1.1.3+ | yes | mixin target |
-| Physics Mod 3.0+ | optional | when missing, no waves; everything still loads |
+| Sable 1.1.3+ | optional | enables wave buoyancy on assembled SubLevels |
+| Sodium 0.6.x | optional | patches its chunk shader for animated water |
+| Iris 1.8.x | optional | patches the loaded shader pack's water vsh |
 
 ## Config
 

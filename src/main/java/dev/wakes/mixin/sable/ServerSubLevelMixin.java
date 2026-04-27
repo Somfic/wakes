@@ -19,6 +19,7 @@ import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
+import org.joml.Matrix3dc;
 import org.joml.Vector3f;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
@@ -64,26 +65,45 @@ public abstract class ServerSubLevelMixin {
 
     private static final double SEA_LEVEL = 63.0;
 
-    /** Per-second buoyancy force gain on wave height, before multiplying by dt
-     *  (Sable's force API takes IMPULSES = force × dt, like the propeller does). */
-    private static final double WAVE_GAIN = 1.5;
+    /** Vertical acceleration per unit wave height (blocks/s² per block of wave).
+     *  Force is now computed as wave × WAVE_ACCEL × mass, so acceleration =
+     *  wave × WAVE_ACCEL is constant regardless of ship size — fixes the L²/L³
+     *  scaling bug where bigger ships barely moved because mass grew faster
+     *  than the footprint-proportional force. */
+    private static final double WAVE_ACCEL = 2.0;
 
-    /** Hard cap on per-tick impulse magnitude (post-dt-multiplication). */
-    private static final double MAX_IMPULSE = 0.4;
+    /** Per-tick cap on wave-induced acceleration magnitude (blocks/s²). Replaces
+     *  the per-area impulse cap. ~12 ≈ above 1G but bounded — keeps pathological
+     *  wave samples from launching the ship while letting deep-ocean storms
+     *  actually toss the ship around. */
+    private static final double MAX_WAVE_ACCEL = 12.0;
 
-    /** Strength of the horizontal drift force pushing the ship along the wave's
-     *  surface tangent (in the wave-travel direction). 0 = pure heave, no drift. */
-    private static final double DRAG_GAIN = 1.5;
+    /** Horizontal acceleration per unit wave slope (blocks/s² per (∂h/∂x)).
+     *  Same mass-scaled formulation as WAVE_ACCEL — drift force scales with
+     *  ship mass instead of footprint area. */
+    private static final double DRAG_ACCEL = 8.0;
 
     /** Sample epsilon for the wave-gradient finite difference (blocks). Smaller =
      *  sharper response to chop, larger = smoother response to long swells. */
     private static final double GRADIENT_EPS = 0.6;
 
-    /** Angular damping coefficient. Applies -ω × ANG_DAMPING × dt as a counter-torque
-     *  each tick, which converts to roughly an exponential decay of angular velocity
-     *  with time constant ~1/ANG_DAMPING seconds. 0 = no damping (free spin),
-     *  3-6 = realistic ship feel, >10 = sluggish. */
-    private static final double ANG_DAMPING = 4.0;
+    /** Hull-bottom sampling density. One sample every ~2.5 blocks gives Nyquist
+     *  coverage of WakesWaveFunction's mid-band swell components (wavelengths
+     *  down to ~5 blocks). Fixed n×n grids alias hard on long hulls. */
+    private static final double BLOCKS_PER_SAMPLE   = 2.5;
+    /** Per-axis sample-count cap. 24 → up to 576 samples on a giant hull;
+     *  bounds trig cost on cruise-liner-sized ships. */
+    private static final int    MAX_SAMPLES_PER_AXIS = 24;
+    /** Per-axis sample-count floor. Keeps the existing feel for sub-10-block
+     *  hulls (matches the old default n=3). */
+    private static final int    MIN_SAMPLES_PER_AXIS = 3;
+
+    /** Angular-damping time constant (seconds). Damping torque is -I·ω/τ, so
+     *  angular velocity decays exponentially with this time constant regardless
+     *  of ship inertia — large hulls finally settle on the same timescale as
+     *  small ones. 0.25 s ≈ matches the old constant-coefficient ANG_DAMPING=4.0
+     *  for small ships. */
+    private static final double ANG_DAMPING_TAU = 0.25;
 
     // Reuse Sable's registered LEVITATION group rather than creating our own.
     // A custom in-memory ForceGroup record has no registry ID, so when the
@@ -137,10 +157,22 @@ public abstract class ServerSubLevelMixin {
         double cz = (bb.minZ() + bb.maxZ()) * 0.5;
         float depthFactor = WakesDepth.factorAt(level, cx, cz);
 
-        int n = Math.max(2, Math.min(5, WakesConfig.SAMPLE_POINTS_PER_AXIS.get()));
-        double dx = (bb.maxX() - bb.minX()) / (n - 1);
-        double dz = (bb.maxZ() - bb.minZ()) / (n - 1);
-        double sampleArea = ((bb.maxX() - bb.minX()) * (bb.maxZ() - bb.minZ())) / (n * n);
+        double extentX = bb.maxX() - bb.minX();
+        double extentZ = bb.maxZ() - bb.minZ();
+        int nx = Math.max(MIN_SAMPLES_PER_AXIS, Math.min(MAX_SAMPLES_PER_AXIS,
+                (int) Math.ceil(extentX / BLOCKS_PER_SAMPLE) + 1));
+        int nz = Math.max(MIN_SAMPLES_PER_AXIS, Math.min(MAX_SAMPLES_PER_AXIS,
+                (int) Math.ceil(extentZ / BLOCKS_PER_SAMPLE) + 1));
+        double dx = extentX / (nx - 1);
+        double dz = extentZ / (nz - 1);
+        // Per-cell mass share: each sample drives an even fraction of the hull
+        // mass. Summed over all cells = total mass, so total impulse = wave_avg
+        // × WAVE_ACCEL × mass × dt → ship-wide acceleration = wave × WAVE_ACCEL,
+        // independent of ship size. Spatial wave variation across cells produces
+        // torque around the COM as before.
+        double mass = massData.getMass();
+        double cellMass = mass / (nx * nz);
+        double cellCap  = MAX_WAVE_ACCEL * cellMass * dt;
         double hullY = bb.minY();   // apply at hull bottom
 
         QueuedForceGroup group = self.getOrCreateQueuedForceGroup(wakesForceGroup());
@@ -155,28 +187,28 @@ public abstract class ServerSubLevelMixin {
 
         boolean debug = false;
 
-        for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
+        for (int i = 0; i < nx; i++) {
+            for (int j = 0; j < nz; j++) {
                 double sx = bb.minX() + i * dx;
                 double sz = bb.minZ() + j * dz;
                 double wave = WakesWaveFunction.waveHeight(sx, sz, time, weather, depthFactor);
 
-                double rawImpulse = wave * WAVE_GAIN * sampleArea * dt;
-                double impulse = Math.max(-MAX_IMPULSE, Math.min(MAX_IMPULSE, rawImpulse));
+                double rawImpulse = wave * WAVE_ACCEL * cellMass * dt;
+                double impulse = clamp(rawImpulse, cellCap);
 
-                // Wave gradient via central differences. Direction (∂h/∂x, ∂h/∂z)
-                // points UP the slope — the direction a wave is pushing floating
-                // objects in. Magnitude is the steepness, so steep crests drift
-                // ships harder than gentle swells.
+                // Wave gradient via 2-tap forward differences (reuses the center
+                // sample). Direction (∂h/∂x, ∂h/∂z) points UP the slope — the
+                // direction a wave pushes floating objects. Magnitude = steepness,
+                // so steep crests drift ships harder than gentle swells. Half-cell
+                // phase lead vs central differences is visually invisible and saves
+                // 2 wave-height calls per sample.
                 double e = GRADIENT_EPS;
                 double hXp = WakesWaveFunction.waveHeight(sx + e, sz, time, weather, depthFactor);
-                double hXm = WakesWaveFunction.waveHeight(sx - e, sz, time, weather, depthFactor);
                 double hZp = WakesWaveFunction.waveHeight(sx, sz + e, time, weather, depthFactor);
-                double hZm = WakesWaveFunction.waveHeight(sx, sz - e, time, weather, depthFactor);
-                double gradX = (hXp - hXm) / (2.0 * e);
-                double gradZ = (hZp - hZm) / (2.0 * e);
-                double dragX = clamp(gradX * DRAG_GAIN * sampleArea * dt, MAX_IMPULSE);
-                double dragZ = clamp(gradZ * DRAG_GAIN * sampleArea * dt, MAX_IMPULSE);
+                double gradX = (hXp - wave) / e;
+                double gradZ = (hZp - wave) / e;
+                double dragX = clamp(gradX * DRAG_ACCEL * cellMass * dt, cellCap);
+                double dragZ = clamp(gradZ * DRAG_ACCEL * cellMass * dt, cellCap);
 
                 if (Math.abs(impulse) < 1e-5 && Math.abs(dragX) < 1e-5 && Math.abs(dragZ) < 1e-5) continue;
 
@@ -203,14 +235,15 @@ public abstract class ServerSubLevelMixin {
         Vector3d vel = body.getLinearVelocity(new Vector3d());
         Vector3d angVel = body.getAngularVelocity(new Vector3d());
 
-        // Angular damping: counter-torque proportional to current angular velocity.
-        // Without this, every wave-induced tilt accumulates angular momentum that
-        // takes a long time to bleed off, so the ship spins more than it should.
-        // Pure torque, no linear component → use ForceTotal directly. Frame: angVel
-        // is in world frame from the pipeline; transform to body/plot frame to
-        // match what ForceTotal feeds back into the body.
-        if (ANG_DAMPING > 0) {
-            Vector3d angImpulseWorld = new Vector3d(angVel).mul(-ANG_DAMPING * dt);
+        // Angular damping: counter-torque -I·ω/τ in world frame, transformed to
+        // body/plot frame for ForceTotal. Using the actual inertia tensor means
+        // the angular-velocity decay rate is τ-seconds *regardless of ship size*
+        // — fixes large hulls rocking forever because their inertia dwarfed the
+        // old constant-coefficient damping torque.
+        if (ANG_DAMPING_TAU > 0) {
+            Matrix3dc inertia = massData.getInertiaTensor();
+            Vector3d angImpulseWorld = inertia.transform(angVel, new Vector3d())
+                    .mul(-dt / ANG_DAMPING_TAU);
             Vector3d angImpulseLocal = new Vector3d();
             pose.transformNormalInverse(angImpulseWorld, angImpulseLocal);
             group.getForceTotal().applyAngularImpulse(angImpulseLocal);

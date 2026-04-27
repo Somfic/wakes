@@ -22,6 +22,15 @@ public final class WakesWaveGLSL {
      *  and {@code uniform float u_WakesDepth01}. See {@link #SWELL_CHOP_FNS}
      *  for the variant that takes those as parameters instead of uniforms. */
     public static final String SWELL_CHOP_FNS = """
+// Global wind direction (unit vector). All three octaves rotate input coords
+// into this frame so the ocean has a single coherent propagation direction.
+const vec2 WAKES_WIND_DIR = vec2(0.866, 0.5);   // ~30° from +X (ENE)
+
+vec2 wakes_windRot(vec2 p) {
+    return vec2( p.x * WAKES_WIND_DIR.x + p.y * WAKES_WIND_DIR.y,
+                -p.x * WAKES_WIND_DIR.y + p.y * WAKES_WIND_DIR.x);
+}
+
 float wakes_swell(vec2 p, float t) {
     const int   ITER         = 10;
     const float FREQUENCY    = 4.5;
@@ -34,6 +43,7 @@ float wakes_swell(vec2 p, float t) {
     const float XZ_SCALE     = 0.035;
     const float TIME_MULT    = 0.045;
 
+    p = wakes_windRot(p);
     float scaledT = t * TIME_MULT;
     vec2  pos = p * XZ_SCALE;
     float angle = 0.0, freq = FREQUENCY, speed = SPEED, weight = WEIGHT_INIT;
@@ -55,6 +65,7 @@ float wakes_swell(vec2 p, float t) {
 }
 
 float wakes_chop(vec2 p, float t) {
+    p = wakes_windRot(p);
     float scaledT = t * 0.18;
     vec2 q = p * 0.22;
     return 0.5 * (
@@ -63,13 +74,30 @@ float wakes_chop(vec2 p, float t) {
     );
 }
 
+// Big rolling sub-swell. Two slow sines with wavelengths ~85-110 blocks give
+// long-period ocean rolls — bow and stern of long ships sit on meaningfully
+// different phases, producing real fore-aft pitch instead of averaging out
+// across short swell.
+float wakes_sub(vec2 p, float t) {
+    p = wakes_windRot(p);
+    float scaledT = t * 0.07;
+    vec2 q = p * 0.04;
+    return 0.5 * (
+          sin(q.x * 1.2 + q.y * 0.7 + scaledT)
+        + sin(q.y * 1.4 - q.x * 0.9 + scaledT * 1.15)
+    );
+}
+
 // Combined wave height with weather + depth amplitude scaling.
 //   weather: 0 calm .. ~1.5 thunderstorm
 //   depth:   0 shore  .. 1 deep ocean
 float wakes_waveHeightAmp(vec2 worldXZ, float t, float weather, float depth) {
-    float swellAmp = (0.9 + weather * 1.4) * depth;
+    float subAmp   = (1.2 + weather * 1.6) * depth;
+    float swellAmp = (1.0 + weather * 1.4) * depth;
     float chopAmp  = (0.05 + weather * 0.45) * depth;
-    return wakes_swell(worldXZ, t) * swellAmp + wakes_chop(worldXZ, t) * chopAmp;
+    return wakes_sub(worldXZ, t)   * subAmp
+         + wakes_swell(worldXZ, t) * swellAmp
+         + wakes_chop(worldXZ, t)  * chopAmp;
 }
 """;
 

@@ -44,12 +44,9 @@ neoForge {
 }
 
 dependencies {
-    // Compile-only references to the bundled mod jars and anything dropped into libs/.
-    // You MUST provide a matching Create jar (e.g. create-1.21.1-6.0.4-19.jar) in libs/
-    // — Aeronautics extends Create's contraption types, so the mixin needs Create
-    // on the compile classpath. Physics Mod is reflective at runtime, so its jar is
-    // optional for compile but useful for IDE navigation.
-    compileOnly fileTree(dir: '.', include: ['*.jar'])
+    // Compile-only references to whatever is dropped into libs/. Run `just fetch-libs`
+    // to populate it with Create, Aeronautics, Sable (+ extracted JIJ deps), Sodium,
+    // and Iris — everything the mixins target at compile time.
     compileOnly fileTree(dir: 'libs', include: ['*.jar'])
 }
 

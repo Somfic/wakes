@@ -13,6 +13,7 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 
 /**
@@ -53,11 +54,19 @@ public final class WakesClientEvents {
         // u_WakesDepthMap (rasterized & uploaded by WakesDepthTexture).
         WakesTime.setDepthFactor(WakesDepth.factorAt(level, p.x, p.z));
         WakesDepthTexture.refreshIfNeeded();
+    }
 
-        if (!wakes$initialReloadDone && ModCompat.IRIS_LOADED && ModCompat.SODIUM_LOADED) {
-            wakes$initialReloadDone = true;
-            wakes$forceIrisReload();
-        }
+    /** Trigger the one-time Iris reload from a tick handler, NOT from inside a
+     *  RenderLevelStageEvent. {@code Iris.reload()} destroys the active pipeline
+     *  (including its DepthTexture); doing that mid-frame leaves later passes
+     *  with stale GL handles → "Tried to use a destroyed GlResource". */
+    @SubscribeEvent
+    public static void onClientTick(ClientTickEvent.Post event) {
+        if (wakes$initialReloadDone) return;
+        if (!ModCompat.IRIS_LOADED || !ModCompat.SODIUM_LOADED) return;
+        if (Minecraft.getInstance().level == null) return;
+        wakes$initialReloadDone = true;
+        wakes$forceIrisReload();
     }
 
     /** When Iris is loaded — even without an active shader pack — its
