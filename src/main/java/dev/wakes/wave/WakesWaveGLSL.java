@@ -80,8 +80,8 @@ float wakes_chop(vec2 p, float t) {
 // across short swell.
 float wakes_sub(vec2 p, float t) {
     p = wakes_windRot(p);
-    float scaledT = t * 0.07;
-    vec2 q = p * 0.04;
+    float scaledT = t * 0.0467;          // 0.07 / 1.5 — period ~135 s
+    vec2 q = p * 0.0267;                 // 0.04 / 1.5 — wavelengths ~165–195 blocks
     return 0.5 * (
           sin(q.x * 1.2 + q.y * 0.7 + scaledT)
         + sin(q.y * 1.4 - q.x * 0.9 + scaledT * 1.15)
@@ -90,11 +90,16 @@ float wakes_sub(vec2 p, float t) {
 
 // Combined wave height with weather + depth amplitude scaling.
 //   weather: 0 calm .. ~1.5 thunderstorm
-//   depth:   0 shore  .. 1 deep ocean
+//   depth:   factor from WakesDepth.factorAt — two-segment:
+//              0   = no water
+//              0.5 = MIN_DEPTH (small waves on, sub still off)
+//              1.0 = DEEP_DEPTH (everything full)
 float wakes_waveHeightAmp(vec2 worldXZ, float t, float weather, float depth) {
-    float subAmp   = (1.2 + weather * 1.6) * depth;
-    float swellAmp = (1.0 + weather * 1.4) * depth;
-    float chopAmp  = (0.05 + weather * 0.45) * depth;
+    float shallowFactor = smoothstep(0.0, 0.5, depth);   // swell + chop
+    float deepFactor    = smoothstep(0.5, 1.0, depth);   // sub
+    float subAmp   = (1.2 + weather * 1.6) * deepFactor;
+    float swellAmp = (1.0 + weather * 1.4) * shallowFactor;
+    float chopAmp  = (0.05 + weather * 0.45) * shallowFactor;
     return wakes_sub(worldXZ, t)   * subAmp
          + wakes_swell(worldXZ, t) * swellAmp
          + wakes_chop(worldXZ, t)  * chopAmp;

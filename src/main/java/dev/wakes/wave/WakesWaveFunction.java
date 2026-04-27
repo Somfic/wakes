@@ -79,8 +79,8 @@ public final class WakesWaveFunction {
     public static double sub(double x, double z, double t) {
         double xR =  x * WIND_DIR_X + z * WIND_DIR_Z;
         double zR = -x * WIND_DIR_Z + z * WIND_DIR_X;
-        double scaledT = t * 0.07;
-        double qx = xR * 0.04, qz = zR * 0.04;
+        double scaledT = t * 0.0467;          // 0.07 / 1.5 — period ~135 s
+        double qx = xR * 0.0267, qz = zR * 0.0267;  // 0.04 / 1.5 — wavelengths ~165–195 blocks
         return 0.5 * (
               Math.sin(qx * 1.2 + qz * 0.7 + scaledT)
             + Math.sin(qz * 1.4 - qx * 0.9 + scaledT * 1.15)
@@ -95,11 +95,25 @@ public final class WakesWaveFunction {
      * @param depth   0 = shore, 1 = deep ocean
      */
     public static double waveHeight(double x, double z, double t, double weather, double depth) {
-        double subAmp   = (1.2 + weather * 1.6) * depth;
-        double swellAmp = (1.0 + weather * 1.4) * depth;
-        double chopAmp  = (0.05 + weather * 0.45) * depth;
+        // Two-stage depth ramp from WakesDepth.factorAt:
+        //   factor=0   → no water
+        //   factor=0.5 → MIN_DEPTH (small waves fully on, big sub still off)
+        //   factor=1.0 → DEEP_DEPTH (everything full strength)
+        double shallowFactor = smoothstep(0.0, 0.5, depth);   // swell + chop
+        double deepFactor    = smoothstep(0.5, 1.0, depth);   // sub
+        double subAmp   = (1.2 + weather * 1.6) * deepFactor;
+        double swellAmp = (1.0 + weather * 1.4) * shallowFactor;
+        double chopAmp  = (0.05 + weather * 0.45) * shallowFactor;
         return sub(x, z, t)   * subAmp
              + swell(x, z, t) * swellAmp
              + chop(x, z, t)  * chopAmp;
+    }
+
+    /** GLSL-style smoothstep. java.lang.Math doesn't ship one. */
+    private static double smoothstep(double edge0, double edge1, double x) {
+        double t = (x - edge0) / (edge1 - edge0);
+        if (t <= 0.0) return 0.0;
+        if (t >= 1.0) return 1.0;
+        return t * t * (3.0 - 2.0 * t);
     }
 }

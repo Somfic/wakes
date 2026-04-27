@@ -30,8 +30,13 @@ public final class WakesDepth {
     private WakesDepth() {}
 
     /**
-     * @return [0, 1]. 0 = above water / very shallow. 1 = at least DEEP_DEPTH blocks
-     *         of water under the surface. Smooth ramp between MIN_DEPTH and DEEP_DEPTH.
+     * @return [0, 1]. Two-segment linear ramp:
+     *           depth = 1 block → 0 (just water touching surface, no waves)
+     *           depth = {@link #MIN_DEPTH}     → 0.5 (small waves fully on, big swell off)
+     *           depth = {@link #DEEP_DEPTH}    → 1.0 (everything full strength)
+     *         {@code WakesWaveFunction.waveHeight} interprets the value: it uses
+     *         {@code smoothstep(0, 0.5, f)} for swell + chop (shallow-friendly)
+     *         and {@code smoothstep(0.5, 1, f)} for the sub-swell (deep only).
      */
     public static float factorAt(BlockGetter level, double x, double z) {
         int blockX = (int) Math.floor(x);
@@ -55,11 +60,13 @@ public final class WakesDepth {
             }
         }
 
-        if (depth <= MIN_DEPTH) return 0f;
+        if (depth <= 1) return 0f;
         if (depth >= DEEP_DEPTH) return 1f;
-        // Smooth ramp.
-        float t = (depth - MIN_DEPTH) / (float) (DEEP_DEPTH - MIN_DEPTH);
-        // Smoothstep curve.
-        return t * t * (3f - 2f * t);
+        if (depth <= MIN_DEPTH) {
+            // Shallow segment: linear 0 → 0.5 across [1, MIN_DEPTH].
+            return 0.5f * (depth - 1) / (float) (MIN_DEPTH - 1);
+        }
+        // Deep segment: linear 0.5 → 1.0 across [MIN_DEPTH, DEEP_DEPTH].
+        return 0.5f + 0.5f * (depth - MIN_DEPTH) / (float) (DEEP_DEPTH - MIN_DEPTH);
     }
 }
