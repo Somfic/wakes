@@ -3,6 +3,7 @@ package dev.wakes.mixin.sable;
 import dev.wakes.Wakes;
 import dev.wakes.WakesConfig;
 import dev.ryanhcode.sable.api.physics.force.ForceGroup;
+import dev.ryanhcode.sable.api.physics.force.ForceGroups;
 import dev.ryanhcode.sable.api.physics.force.QueuedForceGroup;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.physics.mass.MassData;
@@ -11,10 +12,12 @@ import dev.ryanhcode.sable.companion.math.Pose3dc;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.core.BlockPos;
-import net.minecraft.network.chat.Component;
+import net.minecraft.core.particles.DustParticleOptions;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
+import org.joml.Vector3f;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
 import org.spongepowered.asm.mixin.Mixin;
@@ -66,12 +69,14 @@ public abstract class ServerSubLevelMixin {
     /** Hard cap on per-tick impulse magnitude (post-dt-multiplication). */
     private static final double MAX_IMPULSE = 0.4;
 
-    private static final ForceGroup WAKES_FORCE_GROUP = new ForceGroup(
-        Component.literal("Wakes — wave buoyancy"),
-        Component.literal("Wave-driven buoyancy delta on top of Sable's flat-water float"),
-        0x3399ff,
-        true
-    );
+    // Reuse Sable's registered LEVITATION group rather than creating our own.
+    // A custom in-memory ForceGroup record has no registry ID, so when the
+    // simulated:diagram_data network packet tries to encode it for the F3 force
+    // visualizer, it crashes with NPE in ByteBufCodecs. Sable's LEVITATION group
+    // is the right semantic match anyway — wave buoyancy IS lift.
+    private static ForceGroup wakesForceGroup() {
+        return ForceGroups.LEVITATION.get();
+    }
 
     @Inject(
         method = "prePhysicsTick(Ldev/ryanhcode/sable/sublevel/system/SubLevelPhysicsSystem;Ldev/ryanhcode/sable/api/physics/handle/RigidBodyHandle;D)V",
@@ -118,14 +123,19 @@ public abstract class ServerSubLevelMixin {
         double sampleArea = ((bb.maxX() - bb.minX()) * (bb.maxZ() - bb.minZ())) / (n * n);
         double hullY = bb.minY();   // apply at hull bottom
 
-        QueuedForceGroup group = self.getOrCreateQueuedForceGroup(WAKES_FORCE_GROUP);
+        QueuedForceGroup group = self.getOrCreateQueuedForceGroup(wakesForceGroup());
 
         Vector3d worldPoint = new Vector3d();
         Vector3d plotPoint  = new Vector3d();
-        Vector3d impulseVec = new Vector3d();
+        Vector3d worldUp    = new Vector3d();
+        Vector3d localImpulse = new Vector3d();
         int applied = 0;
         double maxAbsImpulse = 0;
         double totalImpulse = 0;
+
+        // Hardcoded ON for now — config is client-side, mixin runs server-side,
+        // so the toggle wouldn't reach us anyway. Remove particles once tuning's done.
+        boolean debug = true;
 
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
@@ -137,23 +147,62 @@ public abstract class ServerSubLevelMixin {
                 double impulse = Math.max(-MAX_IMPULSE, Math.min(MAX_IMPULSE, rawImpulse));
                 if (Math.abs(impulse) < 1e-5) continue;
 
+                // World-space hull-bottom sample point → plot-frame point.
                 worldPoint.set(sx, hullY, sz);
                 pose.transformPositionInverse(worldPoint, plotPoint);
 
-                impulseVec.set(0.0, impulse, 0.0);
-                group.applyAndRecordPointForce(plotPoint, impulseVec);
+                // Force vector in WORLD frame (we want gravity-aligned buoyancy)
+                // → transform into body/plot frame so it stays world-up even when
+                // the ship tilts. Mirrors what ForceTotal accumulates as "local".
+                worldUp.set(0.0, impulse, 0.0);
+                pose.transformNormalInverse(worldUp, localImpulse);
+
+                group.applyAndRecordPointForce(plotPoint, localImpulse);
                 applied++;
                 totalImpulse += impulse;
                 if (Math.abs(impulse) > maxAbsImpulse) maxAbsImpulse = Math.abs(impulse);
+
+                if (debug) {
+                    wakes$spawnDebugParticle(level, sx, hullY, sz, impulse);
+                }
             }
         }
 
         Vector3d vel = body.getLinearVelocity(new Vector3d());
         Vector3d angVel = body.getAngularVelocity(new Vector3d());
+
+        // Magenta dust at the COM in world coords to verify our reference point.
+        if (debug) {
+            // pose.position() is COM in world coords (from Pose3dc.transformPosition definition).
+            level.sendParticles(
+                new DustParticleOptions(new Vector3f(1.0f, 0.0f, 1.0f), 1.5f),
+                pose.position().x(), pose.position().y(), pose.position().z(),
+                1, 0, 0, 0, 0
+            );
+        }
+
         wakes$logOnce(String.format(
             "samples=%d/%d total=%.3f max=%.4f bbY=%.2f..%.2f vy=%.3f angV=(%.3f,%.3f,%.3f)",
             applied, n*n, totalImpulse, maxAbsImpulse, bb.minY(), bb.maxY(), vel.y,
             angVel.x, angVel.y, angVel.z));
+    }
+
+    /** Visualise per-sample force as a coloured dust particle: green for upward
+     *  push (crest), red for downward push (trough). Particle scale grows with
+     *  impulse magnitude so you can see hot-spots at a glance. */
+    @org.spongepowered.asm.mixin.Unique
+    private static void wakes$spawnDebugParticle(ServerLevel level, double x, double y, double z, double impulse) {
+        Vector3f color = impulse > 0
+            ? new Vector3f(0.2f, 1.0f, 0.2f)    // up = green
+            : new Vector3f(1.0f, 0.2f, 0.2f);   // down = red
+        float scale = Math.min(2.0f, (float) (Math.abs(impulse) * 8.0));
+        level.sendParticles(new DustParticleOptions(color, Math.max(0.4f, scale)),
+            x, y, z, 1, 0, 0, 0, 0);
+
+        // Bubble trail in the direction of the impulse — climbs for up, sinks for down.
+        double dyShift = impulse > 0 ? 0.3 : -0.3;
+        level.sendParticles(ParticleTypes.BUBBLE,
+            x, y + dyShift, z, 1, 0, 0, 0, 0);
     }
 
     /** Server-side wave height — must stay numerically aligned with the GLSL in

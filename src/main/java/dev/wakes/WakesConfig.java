@@ -12,6 +12,7 @@ public final class WakesConfig {
     public static final ModConfigSpec.DoubleValue ROLL_SCALE;
     public static final ModConfigSpec.BooleanValue REQUIRE_WATER_UNDERNEATH;
     public static final ModConfigSpec.BooleanValue AFFECT_ALL_CONTRAPTIONS;
+    public static final ModConfigSpec.BooleanValue DEBUG_PARTICLES;
 
     static {
         ModConfigSpec.Builder b = new ModConfigSpec.Builder();
@@ -31,6 +32,8 @@ public final class WakesConfig {
                 .define("requireWaterUnderneath", true);
         AFFECT_ALL_CONTRAPTIONS = b.comment("Phase 1 only targets propeller-bearing contraptions; flip on later phases.")
                 .define("affectAllContraptions", false);
+        DEBUG_PARTICLES = b.comment("Spawn bubble particles at each wave-force sample point, showing force direction and magnitude. Useful for tuning, noisy in normal play.")
+                .define("debugParticles", false);
         b.pop();
 
         SPEC = b.build();
