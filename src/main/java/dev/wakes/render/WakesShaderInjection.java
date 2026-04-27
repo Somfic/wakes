@@ -94,11 +94,11 @@ v_Color = _vert_color * texture(u_LightTex, _vert_tex_light_coord);
 
     public static String maybePatch(String path, String source) {
         if (source.contains(SENTINEL)) return source;   // already patched (recursion guard)
-        // Skip Sodium patching only when Iris has a shader pack ACTIVE — in that
-        // case Iris owns the chunk shader pipeline and our injection is dead.
-        // When Iris is installed but no pack is loaded, Sodium still renders, so
-        // we want to patch as normal.
-        if (ModCompat.irisShadersActive()) return source;
+        // Always patch — when Iris is loaded with a pack active, Iris's own
+        // pipeline overrides Sodium's program anyway, so our patched Sodium
+        // version is harmlessly unused. Skipping it here was leaving water
+        // flat in the no-pack-loaded-but-Iris-installed case where the
+        // isShaderPackInUse() check disagreed with reality.
 
         if (path.endsWith(VERTEX_TARGET)) {
             return patchVertex(source);

@@ -1,9 +1,11 @@
 package dev.wakes.client;
 
+import dev.wakes.ModCompat;
 import dev.wakes.Wakes;
 import dev.wakes.render.WakesDepthTexture;
 import dev.wakes.render.WakesTime;
 import dev.wakes.wave.WakesDepth;
+// Sodium imports removed — we now reload via Iris.reload() reflectively.
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.level.Level;
@@ -22,6 +24,12 @@ import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 public final class WakesClientEvents {
 
     private WakesClientEvents() {}
+
+    /** When Iris is installed but no pack is active at boot, Sodium ends up
+     *  using a pre-compiled chunk shader that bypassed our patcher. Force one
+     *  Sodium pipeline reload after the world has loaded so our patched
+     *  block_layer_opaque.vsh actually gets compiled and bound. */
+    private static boolean wakes$initialReloadDone = false;
 
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent event) {
@@ -45,5 +53,26 @@ public final class WakesClientEvents {
         // u_WakesDepthMap (rasterized & uploaded by WakesDepthTexture).
         WakesTime.setDepthFactor(WakesDepth.factorAt(level, p.x, p.z));
         WakesDepthTexture.refreshIfNeeded();
+
+        if (!wakes$initialReloadDone && ModCompat.IRIS_LOADED && ModCompat.SODIUM_LOADED) {
+            wakes$initialReloadDone = true;
+            wakes$forceIrisReload();
+        }
+    }
+
+    /** When Iris is loaded — even without an active shader pack — its
+     *  VanillaRenderingPipeline captures Sodium's chunk programs that were
+     *  compiled BEFORE our shader-source mixin had a chance to patch them.
+     *  Calling Iris.reload() re-creates the pipeline, which re-compiles
+     *  Sodium's programs, which now go through our patcher. Equivalent to
+     *  the user pressing the shader-toggle keybind once. */
+    private static void wakes$forceIrisReload() {
+        try {
+            Class<?> irisClass = Class.forName("net.irisshaders.iris.Iris");
+            irisClass.getMethod("reload").invoke(null);
+            Wakes.LOG.info("Wakes: forced Iris pipeline reload to pick up wave-shader patch.");
+        } catch (Throwable t) {
+            Wakes.LOG.warn("Wakes: failed to force Iris reload", t);
+        }
     }
 }
