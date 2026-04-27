@@ -7,6 +7,7 @@ import dev.ryanhcode.sable.api.physics.force.QueuedForceGroup;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.physics.mass.MassData;
 import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
+import dev.ryanhcode.sable.companion.math.Pose3dc;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.core.BlockPos;
@@ -93,40 +94,66 @@ public abstract class ServerSubLevelMixin {
         if (bb.minY() > SEA_LEVEL + 5.0) return;
         if (!overlapsAnyWater(level, bb)) return;
 
-        // CRITICAL: COM and force-point must be in the SAME frame. We apply at
-        // exactly the COM → zero offset → zero torque arm → pure heave.
         MassData massData = self.getMassTracker();
         if (massData == null) return;
         Vector3dc com = massData.getCenterOfMass();
         if (com == null) return;
 
-        // Sample wave height at the ship's REAL world center (not plot coords).
-        // The wave field is parametric in real-world (x, z, t).
-        double centerX = (bb.minX() + bb.maxX()) * 0.5;
-        double centerZ = (bb.minZ() + bb.maxZ()) * 0.5;
-        double time = level.getGameTime();
-        float weather = Math.min(1.5f, level.getRainLevel(0f) + level.getThunderLevel(0f) * 0.5f);
+        // Per-sample impulses across an N×N grid of hull-bottom points. Wave
+        // varies in xz, so different samples produce different impulses → natural
+        // torque around the COM gives pitch and roll.
+        Pose3dc pose = self.logicalPose();
+        // Sample wave at sub-tick resolution to match the visible water shader.
+        // Sable subdivides each MC tick into physics substeps; partialPhysicsTick
+        // gives the substep's position in [0, 1].
+        double time = level.getGameTime() + system.getPartialPhysicsTick();
+        float partial = (float) system.getPartialPhysicsTick();
+        float weather = Math.min(1.5f, level.getRainLevel(partial) + level.getThunderLevel(partial) * 0.5f);
         double swellAmp = 0.9 + weather * 1.4;
         double chopAmp  = 0.05 + weather * 0.45;
-        double wave = waveHeightServer(centerX, centerZ, time, swellAmp, chopAmp);
 
-        double area = (bb.maxX() - bb.minX()) * (bb.maxZ() - bb.minZ());
-        // CRITICAL: multiply by dt (timestep). Sable's API takes impulses, not
-        // raw forces. Mirrors `prop.getScaledThrust() * timeStep` in the propeller.
-        double rawImpulse = wave * WAVE_GAIN * area * dt;
-        double impulse = Math.max(-MAX_IMPULSE, Math.min(MAX_IMPULSE, rawImpulse));
+        int n = Math.max(2, Math.min(5, WakesConfig.SAMPLE_POINTS_PER_AXIS.get()));
+        double dx = (bb.maxX() - bb.minX()) / (n - 1);
+        double dz = (bb.maxZ() - bb.minZ()) / (n - 1);
+        double sampleArea = ((bb.maxX() - bb.minX()) * (bb.maxZ() - bb.minZ())) / (n * n);
+        double hullY = bb.minY();   // apply at hull bottom
 
-        // Apply at COM (zero offset → no torque). World-up impulse vector.
         QueuedForceGroup group = self.getOrCreateQueuedForceGroup(WAKES_FORCE_GROUP);
-        Vector3d point = new Vector3d(com);
-        Vector3d impulseVec = new Vector3d(0.0, impulse, 0.0);
-        group.applyAndRecordPointForce(point, impulseVec);
+
+        Vector3d worldPoint = new Vector3d();
+        Vector3d plotPoint  = new Vector3d();
+        Vector3d impulseVec = new Vector3d();
+        int applied = 0;
+        double maxAbsImpulse = 0;
+        double totalImpulse = 0;
+
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                double sx = bb.minX() + i * dx;
+                double sz = bb.minZ() + j * dz;
+                double wave = waveHeightServer(sx, sz, time, swellAmp, chopAmp);
+
+                double rawImpulse = wave * WAVE_GAIN * sampleArea * dt;
+                double impulse = Math.max(-MAX_IMPULSE, Math.min(MAX_IMPULSE, rawImpulse));
+                if (Math.abs(impulse) < 1e-5) continue;
+
+                worldPoint.set(sx, hullY, sz);
+                pose.transformPositionInverse(worldPoint, plotPoint);
+
+                impulseVec.set(0.0, impulse, 0.0);
+                group.applyAndRecordPointForce(plotPoint, impulseVec);
+                applied++;
+                totalImpulse += impulse;
+                if (Math.abs(impulse) > maxAbsImpulse) maxAbsImpulse = Math.abs(impulse);
+            }
+        }
 
         Vector3d vel = body.getLinearVelocity(new Vector3d());
+        Vector3d angVel = body.getAngularVelocity(new Vector3d());
         wakes$logOnce(String.format(
-            "wave=%.3f impulse=%.4f area=%.2f bbY=%.2f..%.2f vy=%.3f COM=(%.1f,%.1f,%.1f)",
-            wave, impulse, area, bb.minY(), bb.maxY(), vel.y,
-            com.x(), com.y(), com.z()));
+            "samples=%d/%d total=%.3f max=%.4f bbY=%.2f..%.2f vy=%.3f angV=(%.3f,%.3f,%.3f)",
+            applied, n*n, totalImpulse, maxAbsImpulse, bb.minY(), bb.maxY(), vel.y,
+            angVel.x, angVel.y, angVel.z));
     }
 
     /** Server-side wave height — must stay numerically aligned with the GLSL in
