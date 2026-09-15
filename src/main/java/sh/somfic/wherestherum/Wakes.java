@@ -14,6 +14,7 @@ public final class Wakes {
 
     public Wakes(IEventBus modBus, ModContainer container) {
         container.registerConfig(ModConfig.Type.CLIENT, WakesConfig.SPEC, MOD_ID + "-client.toml");
+        sh.somfic.wherestherum.sound.WakesSoundRegistry.register(modBus);
         LOG.info("Where's the Rum loaded — aeronautics: {}, sodium: {}",
                 ModCompat.AERONAUTICS_LOADED, ModCompat.SODIUM_LOADED);
     }

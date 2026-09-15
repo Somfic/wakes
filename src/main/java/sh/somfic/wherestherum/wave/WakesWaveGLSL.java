@@ -106,5 +106,86 @@ float wakes_waveHeightAmp(vec2 worldXZ, float t, float weather, float depth) {
 }
 """;
 
+    /**
+     * Shoreline surf / foam field. Kept OUT of {@link #SWELL_CHOP_FNS} on purpose:
+     * that constant is the numeric contract mirrored by {@link WakesWaveFunction}
+     * on the Java/physics side, and foam is a purely visual term that must never
+     * move a single displaced vertex. Folding it in there would silently desync
+     * ship bobbing from the server simulation for a cosmetic effect.
+     *
+     * <p>Depends on {@code wakes_swell}, {@code wakes_chop} and
+     * {@code WAKES_WIND_DIR} from {@link #SWELL_CHOP_FNS}, so it MUST be appended
+     * after that block, never before it.
+     *
+     * <p>The host shader is expected to supply a mutable global
+     * {@code float wakes_foamAmt} for the vertex stage to write into, and to bake
+     * the user's intensity setting in as a literal constant — see
+     * {@code WakesShaderInjection}. Nothing here reads a uniform we don't already
+     * bind, because the uniform-binding mixin is not ours to extend.
+     */
+    public static final String SURF_FNS = """
+// ---------------------------------------------------------------------------
+// Shoreline surf / foam
+// ---------------------------------------------------------------------------
+
+// Cheap hash + value noise. We only need "not obviously tiled" here, and this
+// runs per-vertex (water vertices sit ~1 block apart), so real gradient noise
+// would be wasted cycles. GLSL 330 safe: no bit ops, no integer hashing.
+float wakes_hash12(vec2 p) {
+    vec3 p3 = fract(p.xyx * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float wakes_vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);          // smoothstep interpolant
+    float a = wakes_hash12(i);
+    float b = wakes_hash12(i + vec2(1.0, 0.0));
+    float c = wakes_hash12(i + vec2(0.0, 1.0));
+    float d = wakes_hash12(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// The "shore band": a window over the depth factor produced by WakesDepth.
+//   0.0  = dry land / no water     -> no foam (there is no water to foam)
+//   ~0.5 = MIN_DEPTH (8 blocks)
+//   1.0  = DEEP (30 blocks)        -> no foam (open ocean)
+// Foam wants depth LOW BUT NON-ZERO. The inner smoothstep softens the hard
+// 0 -> epsilon edge at the land boundary; without it the very first wet texel
+// gets full foam and the coast reads as a painted-on white outline. The outer
+// one fades foam back out well before MIN_DEPTH so it stays a coastal effect.
+float wakes_shoreBand(float depth) {
+    float inner = smoothstep(0.015, 0.140, depth);
+    float outer = 1.0 - smoothstep(0.300, 0.600, depth);
+    return inner * outer;
+}
+
+// Crest mask. Deliberately built from the NORMALISED wave shape (swell/chop are
+// -1..1 before amplitude scaling) rather than from the final wave height: in the
+// shore band the depth factor has already crushed amplitude towards zero, so
+// thresholding the scaled height would fade foam out exactly where we want it
+// strongest. This way foam tracks where the wave is cresting regardless of how
+// tall that crest actually is.
+float wakes_crest(vec2 worldXZ, float t) {
+    float s = wakes_swell(worldXZ, t) * 0.75 + wakes_chop(worldXZ, t) * 0.50;
+    return smoothstep(0.10, 0.65, s);
+}
+
+// Final foam coverage in 0..1, BEFORE the baked intensity scale.
+// The noise term drifts along the wind direction so the foam line shimmers and
+// breaks into patches instead of sitting as a static ring around every island.
+float wakes_foam(vec2 worldXZ, float t, float depth) {
+    float band = wakes_shoreBand(depth);
+    if (band <= 0.0) return 0.0;              // early out: covers most of the ocean
+    float crest = wakes_crest(worldXZ, t);
+    vec2  drift = WAKES_WIND_DIR * (t * 0.012);
+    float n = wakes_vnoise(worldXZ * 0.35 + drift);
+    n = mix(0.65, 1.35, n);                   // +/-35% patchiness, never fully off
+    return clamp(band * crest * n, 0.0, 1.0);
+}
+""";
+
     private WakesWaveGLSL() {}
 }

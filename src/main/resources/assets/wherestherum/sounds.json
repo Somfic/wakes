@@ -1,0 +1,13 @@
+{
+  "hull_creak": {
+    "subtitle": "subtitles.wherestherum.hull_creak",
+    "sounds": [
+      { "name": "minecraft:block.wooden_door.open",     "type": "event" },
+      { "name": "minecraft:block.wooden_door.close",    "type": "event" },
+      { "name": "minecraft:block.fence_gate.open",      "type": "event" },
+      { "name": "minecraft:block.fence_gate.close",     "type": "event" },
+      { "name": "minecraft:block.wooden_trapdoor.open", "type": "event" },
+      { "name": "minecraft:block.wooden_trapdoor.close","type": "event" }
+    ]
+  }
+}

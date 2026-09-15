@@ -4,6 +4,7 @@ import sh.somfic.wherestherum.Wakes;
 import sh.somfic.wherestherum.WakesConfig;
 import sh.somfic.wherestherum.buoyancy.FloatTracker;
 import sh.somfic.wherestherum.wave.WakesDepth;
+import sh.somfic.wherestherum.wind.WakesWind;
 import sh.somfic.wherestherum.wave.WakesWaveFunction;
 import dev.ryanhcode.sable.api.physics.force.ForceGroup;
 import dev.ryanhcode.sable.api.physics.force.ForceGroups;
@@ -382,8 +383,10 @@ public abstract class ServerSubLevelMixin {
                                           RigidBodyHandle body, QueuedForceGroup group,
                                           Pose3dc pose, Vector3dc com, double dt,
                                           double time, float weather, float depthFactor) {
-        if (!WakesConfig.FLOAT_ENABLED.get()) return;
-
+        // NOTE: FLOAT_ENABLED gates only the lift loop below, NOT this whole
+        // method. Drag and sails are separate features with their own toggles —
+        // turning buoyancy off to test something must not silently disable hull
+        // drag and wind propulsion along with it.
         var plot = self.getPlot();
         if (plot == null) return;
 
@@ -392,6 +395,7 @@ public abstract class ServerSubLevelMixin {
         FloatTracker.maybeRescan(state, level, gameTime, plot);
         if (state.isEmpty()) return;
 
+        boolean liftEnabled = WakesConfig.FLOAT_ENABLED.get();
         double liftPerBlock = WakesConfig.FLOAT_LIFT_PER_BLOCK.get();
         double maxDepth = WakesConfig.FLOAT_MAX_DEPTH.get();
 
@@ -410,7 +414,7 @@ public abstract class ServerSubLevelMixin {
         int submerged = 0;
         double springK = 0;
 
-        for (BlockPos pos : state.floats()) {
+        for (BlockPos pos : liftEnabled ? state.floats() : java.util.List.<BlockPos>of()) {
             double depth = depthOf.applyAsDouble(pos);
             if (depth <= 0) continue;   // riding above the surface: no lift
             submerged++;
@@ -477,11 +481,154 @@ public abstract class ServerSubLevelMixin {
         }
 
 
+        wakes$applyHydrodynamics(self, body, group, pose, com, dt, submerged, state, time, weather);
+
         if (WakesConfig.DEBUG_LOG.get()) {
             wakes$logOnce("float@" + System.identityHashCode(self), String.format(
-                "float ship floats=%d submerged=%d liftPerBlock=%.1f maxDepth=%.1f",
-                state.floats().size(), submerged, liftPerBlock, maxDepth));
+                "float ship floats=%d sails=%d submerged=%d liftPerBlock=%.1f maxDepth=%.1f",
+                state.floats().size(), state.sails().size(), submerged, liftPerBlock, maxDepth));
         }
+    }
+
+    /**
+     * Hull drag through the water, plus wind propulsion from sails.
+     *
+     * <h2>Anisotropic drag is the whole point</h2>
+     * Without this a hull only feels wave drift, so it skates sideways as freely
+     * as it moves ahead — nothing in the simulation knows which way the boat is
+     * pointing. Real hulls are shaped to slip along the keel and to resist being
+     * pushed sideways, and that single asymmetry is what makes a vessel carve a
+     * turn instead of sliding through it.
+     *
+     * We work in the PLOT frame, which is also the ship's body frame (the plot is
+     * axis-aligned with how the ship was built), so "along the keel" is simply
+     * whichever of local X/Z the hull is longer in. That is measured from the
+     * cached block positions rather than asking Sable for bounds — the blocks are
+     * already in hand and it avoids depending on another API that could move.
+     *
+     * <h2>Sails, and why thrust is applied along the wind</h2>
+     * Sails push along the wind, not along the keel. Combined with the lateral
+     * drag above, correct-looking sailing falls out on its own: wind shoves the
+     * ship bodily downwind, the hull refuses to go sideways, and what survives is
+     * motion along the keel. Point the bow where you want to go and you make way;
+     * turn beam-on and you get shoved. Sailing dead upwind is impossible without
+     * any rule saying so, because there is no force that could do it.
+     *
+     * Thrust is applied at each sail block's real position, so a tall rig heels
+     * the ship — and since we never damp roll, that heel is visible. Yaw damping
+     * below is deliberately yaw-ONLY for the same reason: a hull that spins
+     * forever after a turn feels broken, but roll and pitch must stay free.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private void wakes$applyHydrodynamics(ServerSubLevel self, RigidBodyHandle body,
+                                          QueuedForceGroup group, Pose3dc pose, Vector3dc com,
+                                          double dt, int submerged, FloatTracker.State state,
+                                          double time, float weather) {
+        MassData massData = self.getMassTracker();
+        if (massData == null) return;
+        double mass = massData.getMass();
+        if (mass <= 0) return;
+
+        // Keel axis in body/plot frame, from the hull's own footprint.
+        boolean keelIsX = wakes$keelIsX(state);
+
+        Vector3d plotPoint = new Vector3d();
+        Vector3d worldForce = new Vector3d();
+        Vector3d localForce = new Vector3d();
+
+        if (WakesConfig.DRAG_ENABLED.get() && submerged > 0) {
+            Vector3d vWorld = body.getLinearVelocity(new Vector3d());
+            if (vWorld.lengthSquared() > 1e-8) {
+                Vector3d vBody = pose.transformNormalInverse(vWorld, new Vector3d());
+
+                double cLong = WakesConfig.DRAG_LONGITUDINAL.get();
+                double cLat  = WakesConfig.DRAG_LATERAL.get();
+                double cVert = WakesConfig.DRAG_VERTICAL.get();
+                double cX = keelIsX ? cLong : cLat;
+                double cZ = keelIsX ? cLat : cLong;
+
+                // Wetted "area" proxy: more submerged hull, more drag. Keeps a
+                // laden ship sluggish and a light one nimble for free.
+                double n = submerged;
+                localForce.set(-cX * vBody.x * n * dt,
+                               -cVert * vBody.y * n * dt,
+                               -cZ * vBody.z * n * dt);
+
+                // Never remove more momentum than the component actually has.
+                // An overshoot here would reverse the velocity and turn drag into
+                // a driver — the same instability the heave damping guards against.
+                localForce.x = wakes$clampToMomentum(localForce.x, vBody.x, mass);
+                localForce.y = wakes$clampToMomentum(localForce.y, vBody.y, mass);
+                localForce.z = wakes$clampToMomentum(localForce.z, vBody.z, mass);
+
+                plotPoint.set(com.x(), com.y(), com.z());   // at COM ⇒ no torque
+                group.applyAndRecordPointForce(plotPoint, localForce);
+            }
+
+            // Yaw-only rotational drag.
+            double yawK = WakesConfig.DRAG_YAW.get();
+            if (yawK > 0) {
+                Vector3d angVel = body.getAngularVelocity(new Vector3d());
+                if (Math.abs(angVel.y) > 1e-5) {
+                    Matrix3dc inertia = massData.getInertiaTensor();
+                    double iyy = Math.max(1e-6, inertia.m11());
+                    double impulse = -yawK * angVel.y * iyy * dt;
+                    impulse = wakes$clampToMomentum(impulse, angVel.y, iyy);
+                    // Zero X and Z so only yaw is touched; roll/pitch untouched.
+                    Vector3d angWorld = new Vector3d(0, impulse, 0);
+                    Vector3d angLocal = new Vector3d();
+                    pose.transformNormalInverse(angWorld, angLocal);
+                    group.getForceTotal().applyAngularImpulse(angLocal);
+                }
+            }
+        }
+
+        if (WakesConfig.SAILS_ENABLED.get() && !state.sails().isEmpty()) {
+            double[] wind = WakesWind.direction(time);
+            double windStr = WakesWind.strength(time, weather);
+            if (windStr > 0) {
+                // Keel direction in world space, flattened to XZ.
+                Vector3d keelWorld = pose.transformNormal(
+                        new Vector3d(keelIsX ? 1 : 0, 0, keelIsX ? 0 : 1), new Vector3d());
+                double kl = Math.hypot(keelWorld.x, keelWorld.z);
+                double align = kl > 1e-6
+                        ? Math.abs((keelWorld.x * wind[0] + keelWorld.z * wind[1]) / kl)
+                        : 0.0;   // abs: either end of the hull may be the bow
+
+                if (align >= WakesConfig.SAILS_MIN_ANGLE.get()) {
+                    double per = WakesConfig.SAILS_THRUST.get() * windStr * dt;
+                    for (BlockPos sail : state.sails()) {
+                        worldForce.set(wind[0] * per, 0, wind[1] * per);
+                        pose.transformNormalInverse(worldForce, localForce);
+                        plotPoint.set(sail.getX() + 0.5, sail.getY() + 0.5, sail.getZ() + 0.5);
+                        group.applyAndRecordPointForce(plotPoint, localForce);
+                    }
+                }
+            }
+        }
+    }
+
+    /** True if the hull is longer along body X than body Z — i.e. X is the keel. */
+    @org.spongepowered.asm.mixin.Unique
+    private static boolean wakes$keelIsX(FloatTracker.State state) {
+        java.util.List<BlockPos> sample = state.floats().isEmpty() ? state.sails() : state.floats();
+        if (sample.isEmpty()) return true;
+        int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE;
+        int minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE;
+        for (BlockPos p : sample) {
+            if (p.getX() < minX) minX = p.getX();
+            if (p.getX() > maxX) maxX = p.getX();
+            if (p.getZ() < minZ) minZ = p.getZ();
+            if (p.getZ() > maxZ) maxZ = p.getZ();
+        }
+        return (maxX - minX) >= (maxZ - minZ);
+    }
+
+    /** Clamp a damping impulse so it can never reverse the motion it opposes. */
+    @org.spongepowered.asm.mixin.Unique
+    private static double wakes$clampToMomentum(double impulse, double velocity, double inertiaOrMass) {
+        double max = Math.abs(velocity) * inertiaOrMass;
+        return Math.abs(impulse) > max ? Math.copySign(max, impulse) : impulse;
     }
 
     /** Spawn a small line of dust particles starting at {@code origin} along

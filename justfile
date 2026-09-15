@@ -20,11 +20,21 @@ rebuild: clean build
 jar: build
     @ls -lh build/libs/*.jar
 
-# Copy the built jar to a target mods folder, e.g. `just install ~/minecraft/mods`
+# Build, then atomically swap the jar into a mods folder, e.g. `just install ~/minecraft/mods`
 install dest: build
-    @mkdir -p "{{dest}}"
-    cp build/libs/wherestherum-*.jar "{{dest}}/"
-    @ls -lh "{{dest}}"/wherestherum-*.jar
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{dest}}"
+    if pgrep -f "org.prismlauncher.EntryPoint" > /dev/null 2>&1; then
+        echo "warning: Minecraft appears to be RUNNING." >&2
+        echo "         The jar will be swapped atomically so the running game is not corrupted," >&2
+        echo "         but it will keep using the OLD jar until you fully quit and relaunch." >&2
+    fi
+    src=$(ls build/libs/wherestherum-*.jar | head -1)
+    tmp="{{dest}}/.$(basename "$src").tmp$$"
+    cp "$src" "$tmp"
+    mv -f "$tmp" "{{dest}}/$(basename "$src")"
+    ls -lh "{{dest}}"/wherestherum-*.jar
 
 # Run a NeoForge dev client with the mod loaded
 run-client:

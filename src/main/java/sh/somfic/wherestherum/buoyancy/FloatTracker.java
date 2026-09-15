@@ -53,6 +53,10 @@ public final class FloatTracker {
     public static final TagKey<Block> FLOATS = TagKey.create(
             Registries.BLOCK, ResourceLocation.fromNamespaceAndPath("wherestherum", "floats"));
 
+    /** Blocks that catch wind and drive the ship (wool and banners by default). */
+    public static final TagKey<Block> SAILS = TagKey.create(
+            Registries.BLOCK, ResourceLocation.fromNamespaceAndPath("wherestherum", "sails"));
+
     /** Ticks between full rescans of a SubLevel's block list. Block edits during
      *  the gap (a cannonball taking out planking) are picked up on the next scan. */
     private static final int SCAN_INTERVAL_TICKS = 20;
@@ -63,6 +67,8 @@ public final class FloatTracker {
     public static final class State {
         /** Plot-frame positions of blocks currently in {@link #FLOATS}. */
         private List<BlockPos> floats = List.of();
+        /** Plot-frame positions of blocks in {@link #SAILS}. */
+        private List<BlockPos> sails = List.of();
 
         // NEVER is a sentinel meaning "hasn't scanned yet". It must not be fed
         // through (gameTime - lastScanTick): gameTime - Long.MIN_VALUE overflows
@@ -73,7 +79,8 @@ public final class FloatTracker {
         private long lastScanTick = NEVER;
 
         public List<BlockPos> floats() { return floats; }
-        public boolean isEmpty() { return floats.isEmpty(); }
+        public List<BlockPos> sails() { return sails; }
+        public boolean isEmpty() { return floats.isEmpty() && sails.isEmpty(); }
     }
 
     private FloatTracker() {}
@@ -93,6 +100,7 @@ public final class FloatTracker {
         state.lastScanTick = gameTime;
 
         List<BlockPos> floats = new ArrayList<>();
+        List<BlockPos> sails = new ArrayList<>();
 
         // Chunks must come from the PLOT, not level.getChunkSource(). Sable keeps
         // plot chunks in its own PlotChunkHolder map, so getChunkNow() returns null
@@ -124,15 +132,18 @@ public final class FloatTracker {
                     // Skip the whole 16^3 section unless it might hold something
                     // we care about. Ship plots are mostly air, so this is the
                     // difference between a cheap scan and a stall.
-                    if (!section.maybeHas(s -> s.is(FLOATS))) continue;
+                    if (!section.maybeHas(s -> s.is(FLOATS)) && !section.maybeHas(s -> s.is(SAILS))) continue;
 
                     int baseY = chunk.getMinBuildHeight() + (si << 4);
                     for (int y = 0; y < 16; y++) {
                         for (int x = 0; x < 16; x++) {
                             for (int z = 0; z < 16; z++) {
                                 BlockState s = section.getBlockState(x, y, z);
-                                if (!s.is(FLOATS)) continue;
-                                floats.add(new BlockPos((cx << 4) + x, baseY + y, (cz << 4) + z));
+                                boolean isFloat = s.is(FLOATS);
+                                boolean isSail = !isFloat && s.is(SAILS);
+                                if (!isFloat && !isSail) continue;
+                                BlockPos pos = new BlockPos((cx << 4) + x, baseY + y, (cz << 4) + z);
+                                if (isFloat) floats.add(pos); else sails.add(pos);
                             }
                         }
                     }
@@ -144,11 +155,12 @@ public final class FloatTracker {
         // on change made a scan that found nothing indistinguishable from a scan
         // that never ran — the exact ambiguity that hid an earlier bug here. A
         // zero now positively means "ran, found no buoyant blocks".
-        if (firstScan || floats.size() != state.floats.size()) {
-            Wakes.LOG.info("Wakes: sublevel buoyancy scan — {} floating block(s) (chunks {}x{})",
-                    floats.size(), spanX + 1, spanZ + 1);
+        if (firstScan || floats.size() != state.floats.size() || sails.size() != state.sails.size()) {
+            Wakes.LOG.info("Wakes: sublevel scan — {} floating block(s), {} sail block(s) (chunks {}x{})",
+                    floats.size(), sails.size(), spanX + 1, spanZ + 1);
         }
 
         state.floats = floats;
+        state.sails = sails;
     }
 }

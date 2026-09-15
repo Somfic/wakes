@@ -31,6 +31,15 @@ public final class IrisInjection {
      *  {@code frameTimeCounter}, {@code rainStrength}). Iris reports time in
      *  seconds; we convert to ticks (×20) to share the SAME wave-function
      *  constants as the Sodium path. */
+    /* Shoreline surf ({@link WakesWaveGLSL#SURF_FNS}) is deliberately NOT injected
+     * on the Iris path. Foam keys off the per-vertex depth factor, and this
+     * adapter has no depth map to sample — it hardcodes depth = 1.0 (open ocean),
+     * for which {@code wakes_shoreBand} returns exactly 0. Emitting the foam code
+     * here would therefore cost noise + extra sine evaluations per water vertex
+     * and produce nothing visible. It also has nowhere useful to land: the pack
+     * owns its own water shading/reflection model, so brightening a vertex colour
+     * we don't control is not a safe assumption. Wiring surf into Iris means
+     * plumbing a depth custom-uniform through Iris's uniform system first. */
     private static final String WAVE_BLOCK = SENTINEL + "\n\n"
         + WakesWaveGLSL.SWELL_CHOP_FNS
         + "\n"
