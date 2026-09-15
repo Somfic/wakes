@@ -26,6 +26,7 @@
             pkgs.git                  # for the various source-clone helpers
             pkgs.unzip                # used by extraction scripts
             pkgs.curl                 # used by the iris-jar download in build.gradle setup
+            pkgs.jq                   # `just fetch-libs` resolves Modrinth versions with it
           ];
 
           # Make sure JAVA_HOME points at the flake-supplied JDK so gradle and

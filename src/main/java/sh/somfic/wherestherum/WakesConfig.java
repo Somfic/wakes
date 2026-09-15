@@ -13,6 +13,7 @@ public final class WakesConfig {
     public static final ModConfigSpec.BooleanValue REQUIRE_WATER_UNDERNEATH;
     public static final ModConfigSpec.BooleanValue AFFECT_ALL_CONTRAPTIONS;
     public static final ModConfigSpec.BooleanValue DEBUG_PARTICLES;
+    public static final ModConfigSpec.BooleanValue DEBUG_LOG;
 
     static {
         ModConfigSpec.Builder b = new ModConfigSpec.Builder();
@@ -34,6 +35,8 @@ public final class WakesConfig {
                 .define("affectAllContraptions", false);
         DEBUG_PARTICLES = b.comment("Spawn bubble particles at each wave-force sample point, showing force direction and magnitude. Useful for tuning, noisy in normal play.")
                 .define("debugParticles", false);
+        DEBUG_LOG = b.comment("Log per-ship per-second wave-physics diagnostics (mass, angVel, total impulse, net torque). Useful for chasing rotation runaways; spammy in normal play.")
+                .define("debugLog", false);
         b.pop();
 
         SPEC = b.build();

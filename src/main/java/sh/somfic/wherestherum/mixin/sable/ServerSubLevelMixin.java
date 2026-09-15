@@ -66,16 +66,13 @@ public abstract class ServerSubLevelMixin {
     private static final double SEA_LEVEL = 63.0;
 
     /** Vertical acceleration per unit wave height (blocks/s² per block of wave).
-     *  Pure impulse model: F = wave × WAVE_ACCEL × mass. Ship position lags the
-     *  wave phase by ~180° (forced harmonic, no restoring force from us — Sable
-     *  handles the spring back to sea level), but at least ships visibly MOVE.
-     *  Spring-target was a dead end: stiff enough to track fast waves = stiff
-     *  enough to launch ships out of the ocean. */
-    private static final double WAVE_ACCEL = 8.0;
+     *  Pure impulse model: F = wave × WAVE_ACCEL × mass. Big ships sit at
+     *  ω_eq ∝ WAVE_ACCEL × τ_damp / I, so trimming this is the most direct
+     *  knob for "still rotating too much". */
+    private static final double WAVE_ACCEL = 1.5;
 
-    /** Per-tick cap on wave-induced acceleration magnitude (blocks/s²). Hard
-     *  ceiling — keeps pathological wave samples from launching the ship. */
-    private static final double MAX_WAVE_ACCEL = 15.0;
+    /** Per-tick cap on wave-induced acceleration magnitude (blocks/s²). */
+    private static final double MAX_WAVE_ACCEL = 4.0;
 
     /** Horizontal acceleration per unit wave slope (blocks/s² per (∂h/∂x)).
      *  Same mass-scaled formulation as WAVE_ACCEL — drift force scales with
@@ -97,11 +94,27 @@ public abstract class ServerSubLevelMixin {
      *  hulls (matches the old default n=3). */
     private static final int    MIN_SAMPLES_PER_AXIS = 3;
 
-    /** Angular-damping time constant (seconds). Damping torque is -I·ω/τ.
-     *  Set ≤0 to disable entirely and let Sable's built-in damping handle
-     *  rotation — currently disabled because our spring + Sable's own damping
-     *  was leaving ships in jello, slow to right themselves. */
-    private static final double ANG_DAMPING_TAU = 0.0;
+    /** Angular-damping time constant (seconds) for the inertia-proportional
+     *  component. Damping torque from this part is -I·ω/τ — works well for
+     *  large hulls (decay rate independent of size), but tiny SubLevels
+     *  (1-block logs, mass<2) have I close to 0 so this term vanishes. The
+     *  constant-coefficient term below covers them. */
+    private static final double ANG_DAMPING_TAU = 1.0;
+
+    /** Constant-coefficient angular damping (1/s, applied as -k·ω, no inertia
+     *  scaling). This is what actually damps small-mass SubLevels; for big
+     *  ships it's swamped by the inertia-proportional term. The diagnostic
+     *  logs showed mass<2 ships sitting at ω≈1 rad/s with the inertia-only
+     *  damping; this term should pull them down to ω≈0.1 quickly. */
+    private static final double ANG_DAMPING_CONST = 0.5;
+
+    /** Righting-moment stiffness (1/s²). Sable's flat-water buoyancy is COM-
+     *  centric and provides no metacentric restoring moment, so SubLevels can
+     *  settle at any orientation — including 45° on their side. We assume the
+     *  ship was built with its body-Y axis "up" and apply a gentle torque to
+     *  restore that. K=0.25 + critical damping (τ=1) → upright in ~2 seconds
+     *  from a 45° tilt. Set to 0 to disable. */
+    private static final double UPRIGHT_RESTORE_K = 0.25;
 
     // Reuse Sable's registered LEVITATION group rather than creating our own.
     // A custom in-memory ForceGroup record has no registry ID, so when the
@@ -171,7 +184,14 @@ public abstract class ServerSubLevelMixin {
         double mass = massData.getMass();
         double cellMass = mass / (nx * nz);
         double cellCap  = MAX_WAVE_ACCEL * cellMass * dt;
-        double hullY = bb.minY();   // apply at hull bottom
+        // Apply forces at the body's COM Y in world frame, NOT at bb.minY().
+        // Using bb.minY() means the application point swings around the body
+        // as it rotates (the AABB's lowest corner moves with orientation), and
+        // each tick the world-frame force creates a body-frame torque from the
+        // shifted lever arm — that's the positive-feedback loop that was making
+        // logs spin faster as they rolled. COM Y doesn't shift with rotation,
+        // so torque comes only from the xz offset of each cell relative to COM.
+        double comWorldY = pose.position().y();
 
         QueuedForceGroup group = self.getOrCreateQueuedForceGroup(wakesForceGroup());
 
@@ -182,8 +202,14 @@ public abstract class ServerSubLevelMixin {
         int applied = 0;
         double maxAbsImpulse = 0;
         double totalImpulse = 0;
+        double totalDragMag = 0;
+        // Net torque accumulator in world frame: Σ (cellPos − COM) × F.
+        // |τ| / cellsApplied tells us whether forces are net-rotating or net-zero.
+        Vector3d totalTorque = new Vector3d();
+        Vector3d comWorld = new Vector3d(pose.position().x(), pose.position().y(), pose.position().z());
 
-        boolean debug = false;
+        boolean debug    = WakesConfig.DEBUG_PARTICLES.get();
+        boolean debugLog = WakesConfig.DEBUG_LOG.get();
 
         for (int i = 0; i < nx; i++) {
             for (int j = 0; j < nz; j++) {
@@ -213,8 +239,9 @@ public abstract class ServerSubLevelMixin {
 
                 if (Math.abs(impulse) < 1e-5 && Math.abs(dragX) < 1e-5 && Math.abs(dragZ) < 1e-5) continue;
 
-                // World-space hull-bottom sample point → plot-frame point.
-                worldPoint.set(sx, hullY, sz);
+                // World-space sample point at cell xz, COM Y → plot-frame point.
+                // See comWorldY note above for why we don't use bb.minY here.
+                worldPoint.set(sx, comWorldY, sz);
                 pose.transformPositionInverse(worldPoint, plotPoint);
 
                 // World-space combined force: vertical heave + horizontal drift.
@@ -225,25 +252,56 @@ public abstract class ServerSubLevelMixin {
                 group.applyAndRecordPointForce(plotPoint, localImpulse);
                 applied++;
                 totalImpulse += impulse;
+                totalDragMag += Math.abs(dragX) + Math.abs(dragZ);
                 if (Math.abs(impulse) > maxAbsImpulse) maxAbsImpulse = Math.abs(impulse);
 
+                if (debugLog) {
+                    // Accumulate world-frame torque about COM: r × F.
+                    double rx = sx - comWorld.x;
+                    double ry = comWorldY - comWorld.y; // = 0 by construction; left explicit
+                    double rz = sz - comWorld.z;
+                    double fx = dragX, fy = impulse, fz = dragZ;
+                    totalTorque.x += ry * fz - rz * fy;
+                    totalTorque.y += rz * fx - rx * fz;
+                    totalTorque.z += rx * fy - ry * fx;
+                }
+
                 if (debug) {
-                    wakes$spawnDebugParticle(level, sx, hullY, sz, impulse);
+                    wakes$spawnDebugParticle(level, sx, comWorldY, sz, impulse);
                 }
             }
         }
 
         Vector3d angVel = body.getAngularVelocity(new Vector3d());
 
-        // Angular damping: counter-torque -I·ω/τ in world frame, transformed to
-        // body/plot frame for ForceTotal. Using the actual inertia tensor means
-        // the angular-velocity decay rate is τ-seconds *regardless of ship size*
-        // — fixes large hulls rocking forever because their inertia dwarfed the
-        // old constant-coefficient damping torque.
-        if (ANG_DAMPING_TAU > 0) {
-            Matrix3dc inertia = massData.getInertiaTensor();
-            Vector3d angImpulseWorld = inertia.transform(angVel, new Vector3d())
-                    .mul(-dt / ANG_DAMPING_TAU);
+        // Angular damping: combined inertia-proportional + constant-coefficient
+        // term. Big ships (high I) are dominated by -I·ω/τ → decay rate ≈ 1/τ
+        // regardless of size. Tiny ships (I ≈ 0) need the constant -k·ω term
+        // because the inertia term vanishes. Both go into a single world-frame
+        // angular impulse, transformed to body frame for ForceTotal.
+        Matrix3dc inertia = massData.getInertiaTensor();
+        if (ANG_DAMPING_TAU > 0 || ANG_DAMPING_CONST > 0 || UPRIGHT_RESTORE_K > 0) {
+            Vector3d angImpulseWorld = new Vector3d();
+            if (ANG_DAMPING_TAU > 0) {
+                angImpulseWorld.add(inertia.transform(angVel, new Vector3d())
+                        .mul(-dt / ANG_DAMPING_TAU));
+            }
+            if (ANG_DAMPING_CONST > 0) {
+                angImpulseWorld.add(new Vector3d(angVel).mul(-ANG_DAMPING_CONST * dt));
+            }
+            // Righting torque: rotate body so its body-Y axis aligns with world +Y.
+            // bodyUpInWorld = pose · (0,1,0). Cross with world up (0,1,0) gives an
+            // axis perpendicular to both, magnitude sin(tilt). Apply scaled by mass-
+            // weighted inertia so the torque produces the same angular acceleration
+            // regardless of ship size (matches the inertia-aware damping above).
+            if (UPRIGHT_RESTORE_K > 0) {
+                Vector3d bodyUp = pose.transformNormal(new Vector3d(0, 1, 0), new Vector3d());
+                // cross = bodyUp × (0,1,0) = (-bodyUp.z, 0, bodyUp.x).
+                Vector3d cross = new Vector3d(-bodyUp.z, 0.0, bodyUp.x);
+                Vector3d rightingImpulse = inertia.transform(cross, new Vector3d())
+                        .mul(UPRIGHT_RESTORE_K * dt);
+                angImpulseWorld.add(rightingImpulse);
+            }
             Vector3d angImpulseLocal = new Vector3d();
             pose.transformNormalInverse(angImpulseWorld, angImpulseLocal);
             group.getForceTotal().applyAngularImpulse(angImpulseLocal);
@@ -257,9 +315,62 @@ public abstract class ServerSubLevelMixin {
                 pose.position().x(), pose.position().y(), pose.position().z(),
                 1, 0, 0, 0, 0
             );
+            // Cyan trail along the angular velocity axis (length ∝ |ω|): shows
+            // visually which axis the ship is spinning around right now.
+            wakes$spawnAxisTrail(level, comWorld, angVel, 4.0, new Vector3f(0.2f, 0.9f, 1.0f));
+            // Yellow trail along the net wave-driven torque axis: if it stays
+            // aligned with the cyan trail, our forces are *pumping* rotation;
+            // if it opposes, they're damping it.
+            if (debugLog) {
+                wakes$spawnAxisTrail(level, comWorld, totalTorque, 1.0, new Vector3f(1.0f, 1.0f, 0.2f));
+            }
         }
 
-        // Logging silenced — re-enable wakes$logOnce(...) here if you need to debug.
+        if (debugLog) {
+            double angVelMag    = angVel.length();
+            double torqueMag    = totalTorque.length();
+            // Sign relative to angVel: positive means torque is along ω
+            // (pumping rotation), negative means opposing (damping).
+            double torqueDotOmega = angVelMag > 1e-6
+                    ? totalTorque.dot(angVel) / angVelMag
+                    : 0.0;
+            String key = "diag@" + System.identityHashCode(self);
+            wakes$logOnce(key, String.format(
+                "ship %s mass=%.1f I.diag=%.1f,%.1f,%.1f comY=%.2f vy=%.3f " +
+                "ω=(%.3f,%.3f,%.3f)|%.3f| Σimp_y=%.4f Σ|drag|=%.4f " +
+                "|τ|=%.4f τ·ω̂=%.4f cells=%d maxImp=%.4f",
+                key,
+                mass,
+                inertia.m00(), inertia.m11(), inertia.m22(),
+                comWorld.y, body.getLinearVelocity(new Vector3d()).y,
+                angVel.x, angVel.y, angVel.z, angVelMag,
+                totalImpulse, totalDragMag,
+                torqueMag, torqueDotOmega,
+                applied, maxAbsImpulse
+            ));
+        }
+    }
+
+    /** Spawn a small line of dust particles starting at {@code origin} along
+     *  {@code axis}, length {@code lengthScale × |axis|}. Used to visualise
+     *  angular-velocity / net-torque vectors in-world. */
+    @org.spongepowered.asm.mixin.Unique
+    private static void wakes$spawnAxisTrail(ServerLevel level, Vector3dc origin,
+                                              Vector3dc axis, double lengthScale,
+                                              Vector3f color) {
+        double mag = axis.length();
+        if (mag < 1e-4) return;
+        double sx = axis.x() / mag, sy = axis.y() / mag, sz = axis.z() / mag;
+        double len = Math.min(6.0, mag * lengthScale);
+        int steps = (int) Math.ceil(len * 2.0);
+        for (int k = 1; k <= steps; k++) {
+            double t = k * len / steps;
+            level.sendParticles(
+                new DustParticleOptions(color, 0.6f),
+                origin.x() + sx * t, origin.y() + sy * t, origin.z() + sz * t,
+                1, 0, 0, 0, 0
+            );
+        }
     }
 
     /** Visualise per-sample force as a coloured dust particle: green for upward
@@ -308,8 +419,7 @@ public abstract class ServerSubLevelMixin {
     private static final java.util.concurrent.ConcurrentHashMap<String, Long> wakes$lastLogByKey = new java.util.concurrent.ConcurrentHashMap<>();
 
     @org.spongepowered.asm.mixin.Unique
-    private static void wakes$logOnce(String msg) {
-        String key = msg.length() > 24 ? msg.substring(0, 24) : msg;
+    private static void wakes$logOnce(String key, String msg) {
         long now = System.currentTimeMillis();
         Long prev = wakes$lastLogByKey.get(key);
         if (prev != null && now - prev < 1000L) return;
