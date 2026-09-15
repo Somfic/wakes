@@ -52,9 +52,28 @@ public final class WakesClientEvents {
         // Fallback depth at the camera position — used when a vertex falls outside
         // the depth-texture coverage range. The real per-vertex depth comes from
         // u_WakesDepthMap (rasterized & uploaded by WakesDepthTexture).
-        WakesTime.setDepthFactor(WakesDepth.factorAt(level, p.x, p.z));
+        float depthFactor = WakesDepth.factorAt(level, p.x, p.z);
+        WakesTime.setDepthFactor(depthFactor);
         WakesDepthTexture.refreshIfNeeded();
+
+        // The uniforms are confirmed bound, so if the water still looks flat the
+        // answer is in these VALUES. Depth is the one that silently zeroes
+        // everything: wave amplitude is gated by smoothstep(0, 0.5, depth) and
+        // smoothstep(0.5, 1, depth), so depth=0 means a perfectly flat surface by
+        // design. WakesDepth needs >1 block of water for any wave at all, 8 for
+        // small waves, 30 for full swell — a shallow pond is *supposed* to be
+        // glassy. Throttled to once a second.
+        long now = System.currentTimeMillis();
+        if (depthFactor <= 0.0f && now - wakes$lastValueLog > 5000L) {
+            wakes$lastValueLog = now;
+            Wakes.LOG.info(String.format(
+                "Wakes: depth factor 0 at cam=(%.1f,%.1f,%.1f) — no waves here "
+                + "(not water, or shallower than %d blocks)",
+                p.x, p.y, p.z, WakesDepth.MIN_DEPTH));
+        }
     }
+
+    private static long wakes$lastValueLog = 0L;
 
     /** Trigger the one-time Iris reload from a tick handler, NOT from inside a
      *  RenderLevelStageEvent. {@code Iris.reload()} destroys the active pipeline

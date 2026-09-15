@@ -2,6 +2,7 @@ package sh.somfic.wherestherum.mixin.sable;
 
 import sh.somfic.wherestherum.Wakes;
 import sh.somfic.wherestherum.WakesConfig;
+import sh.somfic.wherestherum.buoyancy.FloatTracker;
 import sh.somfic.wherestherum.wave.WakesDepth;
 import sh.somfic.wherestherum.wave.WakesWaveFunction;
 import dev.ryanhcode.sable.api.physics.force.ForceGroup;
@@ -272,6 +273,9 @@ public abstract class ServerSubLevelMixin {
             }
         }
 
+        wakes$applyFloatBuoyancy(self, level, body, group, pose, com, dt,
+                time, weather, depthFactor);
+
         Vector3d angVel = body.getAngularVelocity(new Vector3d());
 
         // Angular damping: combined inertia-proportional + constant-coefficient
@@ -348,6 +352,135 @@ public abstract class ServerSubLevelMixin {
                 torqueMag, torqueDotOmega,
                 applied, maxAbsImpulse
             ));
+        }
+    }
+
+    /**
+     * Depth-proportional buoyancy for blocks tagged {@code #wherestherum:floats}
+     * (vanilla sponge), plus the soak-through simulation that sinks a breached hull.
+     *
+     * Deliberately unlike Aeronautics levitite in two ways:
+     *
+     * 1. Lift is per-BLOCK, not per-unit-mass. A heavier ship does not get more
+     *    lift for free — you float it by packing in more sponge. That is what
+     *    makes sponge volume a real design constraint.
+     *
+     * 2. There is NO friction/drag term. Sable's floating_material friction fields
+     *    feed a frictionTorque that flattens a vessel's rocking; we add nothing of
+     *    the sort. The only damping here is explicitly vertical, applied at the COM
+     *    (zero lever arm ⇒ zero torque), so heave settles while roll and pitch stay
+     *    completely free.
+     *
+     * Because force grows with submersion depth and stops at the surface, the hull
+     * finds its own waterline: sink it and lift rises until it balances weight. A
+     * tilted hull has deeper blocks on the low side, which lift harder — a genuine
+     * metacentric righting moment that emerges from the geometry rather than being
+     * faked with a restoring torque.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private void wakes$applyFloatBuoyancy(ServerSubLevel self, ServerLevel level,
+                                          RigidBodyHandle body, QueuedForceGroup group,
+                                          Pose3dc pose, Vector3dc com, double dt,
+                                          double time, float weather, float depthFactor) {
+        if (!WakesConfig.FLOAT_ENABLED.get()) return;
+
+        var plot = self.getPlot();
+        if (plot == null) return;
+
+        FloatTracker.State state = FloatTracker.get(self.getRuntimeId());
+        long gameTime = level.getGameTime();
+        FloatTracker.maybeRescan(state, level, gameTime, plot);
+        if (state.isEmpty()) return;
+
+        double liftPerBlock = WakesConfig.FLOAT_LIFT_PER_BLOCK.get();
+        double maxDepth = WakesConfig.FLOAT_MAX_DEPTH.get();
+
+        // Submersion is measured against the live wave surface, not flat sea level,
+        // so blocks duck under and clear the water as swells roll past.
+        java.util.function.ToDoubleFunction<BlockPos> depthOf = pos -> {
+            Vector3d w = new Vector3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+            pose.transformPosition(w);
+            double surface = SEA_LEVEL + WakesWaveFunction.waveHeight(w.x, w.z, time, weather, depthFactor);
+            return surface - w.y;
+        };
+
+        Vector3d plotPoint = new Vector3d();
+        Vector3d worldForce = new Vector3d();
+        Vector3d localForce = new Vector3d();
+        int submerged = 0;
+        double springK = 0;
+
+        for (BlockPos pos : state.floats()) {
+            double depth = depthOf.applyAsDouble(pos);
+            if (depth <= 0) continue;   // riding above the surface: no lift
+            submerged++;
+
+            double impulse = liftPerBlock * Math.min(depth, maxDepth) * dt;
+
+            // Accumulate the hull's vertical spring stiffness k = dF/dy for the
+            // damping calculation below. Only blocks still on the linear part of
+            // the curve contribute: once a block saturates at maxDepth its lift
+            // stops changing with depth, so it provides force but no restoring
+            // stiffness. Getting this right is what lets damping track the real
+            // spring rather than a guess.
+            if (depth < maxDepth) springK += liftPerBlock;
+
+            // The block's own plot position IS the correct application point —
+            // SubLevel blocks live in the parent level's plot region, the same
+            // frame the mass tracker reports its centre of mass in. Using the
+            // real position (not the COM) is the whole point: off-centre lift
+            // is what produces the righting moment.
+            plotPoint.set(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+            worldForce.set(0, impulse, 0);
+            pose.transformNormalInverse(worldForce, localForce);
+            group.applyAndRecordPointForce(plotPoint, localForce);
+        }
+
+        // Vertical damping at the COM, derived from the spring we just measured
+        // rather than being a fixed constant.
+        //
+        // The hull is a spring-mass system: stiffness k = springK (force per block
+        // of displacement), mass m. Its damping ratio is ζ = c / (2·√(k·m)). The
+        // previous version used a fixed coefficient in 1/s, which meant ζ silently
+        // changed with BOTH ship mass and coral count — pack in more coral, stiffen
+        // the spring, and a constant 0.5 becomes badly underdamped. That is the
+        // oscillation: not a wrong number, a quantity that cannot be a constant.
+        //
+        // So solve for the coefficient that hits the requested ratio:
+        //     c = ζ · 2·√(k·m)
+        // ζ=1 is critical damping (settles fast, no overshoot); ~0.7 keeps a little
+        // life in the heave; 0 disables. This is applied at the COM, so the lever
+        // arm is zero and it still cannot produce any torque — roll and pitch stay
+        // as free as before.
+        double zeta = WakesConfig.FLOAT_DAMPING_RATIO.get();
+        if (submerged > 0 && zeta > 0 && springK > 0) {
+            double vy = body.getLinearVelocity(new Vector3d()).y;
+            if (Math.abs(vy) > 1e-4) {
+                double mass = self.getMassTracker() != null ? self.getMassTracker().getMass() : 0;
+                if (mass > 0) {
+                    double c = zeta * 2.0 * Math.sqrt(springK * mass);
+                    double impulse = -c * vy * dt;
+                    // Never remove more vertical momentum than the hull actually
+                    // has: an over-large damping impulse would flip the velocity
+                    // and become a driver instead of a damper, which is its own
+                    // oscillation. Clamping makes this unconditionally stable
+                    // regardless of substep size or how stiff the spring gets.
+                    double maxImpulse = Math.abs(vy) * mass;
+                    if (Math.abs(impulse) > maxImpulse) impulse = Math.copySign(maxImpulse, impulse);
+
+                    worldForce.set(0, impulse, 0);
+                    pose.transformNormalInverse(worldForce, localForce);
+                    plotPoint.set(com.x(), com.y(), com.z());   // zero lever arm ⇒ no torque
+                    group.applyAndRecordPointForce(plotPoint, localForce);
+                }
+            }
+        }
+
+
+        if (WakesConfig.DEBUG_LOG.get()) {
+            wakes$logOnce("float@" + System.identityHashCode(self), String.format(
+                "float ship floats=%d submerged=%d liftPerBlock=%.1f maxDepth=%.1f",
+                state.floats().size(), submerged, liftPerBlock, maxDepth));
         }
     }
 

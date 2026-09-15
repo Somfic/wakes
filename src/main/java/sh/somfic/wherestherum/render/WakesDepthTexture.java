@@ -82,30 +82,74 @@ public final class WakesDepthTexture {
         double newOriginX = Math.floor(px - RANGE * 0.5);
         double newOriginZ = Math.floor(pz - RANGE * 0.5);
 
-        if (Double.isFinite(lastOriginX)
-            && Math.abs(newOriginX - lastOriginX) < REFRESH_DISTANCE
-            && Math.abs(newOriginZ - lastOriginZ) < REFRESH_DISTANCE) {
-            return;   // close enough to last refresh, skip
-        }
+        long now = System.currentTimeMillis();
+        boolean moved = !Double.isFinite(lastOriginX)
+                || Math.abs(newOriginX - lastOriginX) >= REFRESH_DISTANCE
+                || Math.abs(newOriginZ - lastOriginZ) >= REFRESH_DISTANCE;
+
+        // Re-rasterize even when standing still if the last attempt sampled
+        // unloaded chunks, or periodically as a safety net.
+        //
+        // This is what made water flat until you travelled: the first refresh runs
+        // on the first frame after world load, when surrounding chunks have not
+        // streamed in yet. factorAt then reads air everywhere and produces an
+        // ALL-ZERO depth map, which the shader reads as "no water" and flattens
+        // the ocean completely. lastOrigin was committed regardless, so that empty
+        // map stuck until the player moved REFRESH_DISTANCE and happened to
+        // re-rasterize against loaded chunks — after which it looked fine forever,
+        // including back at the original spot.
+        boolean retry = !lastRefreshComplete && now - lastRefreshAt >= RETRY_INTERVAL_MS;
+        boolean stale = now - lastRefreshAt >= MAX_AGE_MS;
+        if (!moved && !retry && !stale) return;
 
         try {
-            rasterizeAndUpload(level, newOriginX, newOriginZ);
+            boolean complete = rasterizeAndUpload(level, newOriginX, newOriginZ);
             lastOriginX = newOriginX;
             lastOriginZ = newOriginZ;
+            lastRefreshAt = now;
+            if (complete != lastRefreshComplete) {
+                Wakes.LOG.info("Wakes: depth map {} (origin {}, {})",
+                        complete ? "complete" : "INCOMPLETE — chunks still loading, will retry",
+                        (int) newOriginX, (int) newOriginZ);
+            }
+            lastRefreshComplete = complete;
         } catch (Throwable t) {
             Wakes.LOG.warn("Failed to refresh wake depth texture", t);
         }
     }
 
-    private static void rasterizeAndUpload(Level level, double originX, double originZ) {
+    /** Retry cadence while the map is still sampling unloaded chunks. */
+    private static final long RETRY_INTERVAL_MS = 500L;
+    /** Safety-net full refresh, so terrain edits and late chunk streaming heal. */
+    private static final long MAX_AGE_MS = 10_000L;
+
+    private static long lastRefreshAt = 0L;
+    private static boolean lastRefreshComplete = false;
+
+    /** @return true if every sample came from a loaded chunk. */
+    private static boolean rasterizeAndUpload(Level level, double originX, double originZ) {
         pixelBuffer.clear();
+        // Depth under the player, used for samples we cannot actually read. Zero
+        // would mean "no water" and flatten those areas; assuming they resemble
+        // the player's surroundings is a far better guess, and it only affects
+        // cells where water geometry exists at all.
+        float fallback = WakesDepth.factorAt(level, Minecraft.getInstance().player.getX(),
+                                                    Minecraft.getInstance().player.getZ());
+        boolean complete = true;
+
         for (int j = 0; j < SIZE; j++) {
             for (int i = 0; i < SIZE; i++) {
                 // Sample at the centre of each cell in world coords.
                 double x = originX + (i + 0.5) * CELL;
                 double z = originZ + (j + 0.5) * CELL;
+                float factor;
+                if (level.hasChunkAt(net.minecraft.core.BlockPos.containing(x, WakesDepth.SEA_LEVEL, z))) {
+                    factor = WakesDepth.factorAt(level, x, z);
+                } else {
+                    factor = fallback;
+                    complete = false;
+                }
                 // factorAt returns 0..1; remap to byte [0, 255].
-                float factor = WakesDepth.factorAt(level, x, z);
                 int byteVal = Math.max(0, Math.min(255, Math.round(factor * 255f)));
                 pixelBuffer.put((byte) byteVal);
             }
@@ -117,5 +161,6 @@ public final class WakesDepthTexture {
         GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, 0, 0, SIZE, SIZE,
                 GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, pixelBuffer);
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevBound);
+        return complete;
     }
 }

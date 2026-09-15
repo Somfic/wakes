@@ -6,7 +6,8 @@
   "plugin": "sh.somfic.wherestherum.WakesMixinPlugin",
   "refmap": "wherestherum.refmap.json",
   "mixins": [
-    "sable.ServerSubLevelMixin"
+    "sable.ServerSubLevelMixin",
+    "vanilla.CoralBlockMixin"
   ],
   "client": [
     "PropellerBearingContraptionEntityMixin",

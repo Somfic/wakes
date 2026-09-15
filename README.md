@@ -45,3 +45,24 @@ Versions below are what the mod is currently built and tested against.
 - `affectAllContraptions` — Phase 1 only targets propeller-bearing contraptions
 - `debugParticles` — dust particles at each wave-force sample point; noisy in normal play
 - `debugLog` — per-ship, per-second physics diagnostics (mass, angular velocity, net torque)
+
+### `[buoyancy]`
+
+Depth-proportional lift for blocks tagged `#wherestherum:floats` — the full-cube coral
+blocks by default. Unlike Aeronautics levitite this adds **no** rotational drag, so a hull
+keeps rocking with the swell; the only damping is vertical and is applied at the centre of
+mass (zero lever arm, so it cannot induce torque).
+
+Lift scales with block **count**, not ship mass, and grows with submersion depth — so a hull
+settles at its own waterline rather than launching, and a tilted hull's deeper side lifts
+harder, giving a righting moment that falls out of the geometry.
+
+- `enabled` — master toggle
+- `liftPerBlock` — lift per floating block per block of submersion depth
+- `maxDepth` — depth at which a block's lift stops growing. Set to `1.0` for a sharp,
+  predictable waterline (a block then saturates once fully submerged, as real displacement
+  does); larger values let a hull sink deeper before lift balances weight
+- `verticalDamping` — vertical-only damping (1/s); `0` for a completely undamped hull
+
+Minimum blocks to float a hull is `Weight / (liftPerBlock × maxDepth)` — below that, lift
+saturates and she sinks regardless.

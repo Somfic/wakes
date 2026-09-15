@@ -52,6 +52,27 @@ public abstract class DefaultShaderInterfaceMixin {
         this.wakes$uniformDepthMap      = ctx.bindUniformOptional("u_WakesDepthMap", GlUniformInt::new);
         this.wakes$uniformDepthMapOrigin= ctx.bindUniformOptional("u_WakesDepthMapOrigin", GlUniformFloat2v::new);
         this.wakes$uniformDepthMapRange = ctx.bindUniformOptional("u_WakesDepthMapRange", GlUniformFloat::new);
+
+        // Decisive diagnostic for "water isn't moving". A uniform only binds if it
+        // actually survived into the compiled program, so this distinguishes the
+        // two failure modes that otherwise look identical in-game:
+        //
+        //   translucent=true  time=false -> the IS_TRANSLUCENT define is NOT
+        //       reaching the compile, so the preprocessor stripped our whole
+        //       block and the patch is a no-op.
+        //   translucent=true  time=true  -> the GLSL is live and compiled; any
+        //       remaining problem is in the uniform VALUES or the wave maths,
+        //       not in whether the code exists.
+        //
+        // Logged for every pass so a missing translucent line is itself a signal.
+        boolean translucent = options != null && options.pass() != null && options.pass().isTranslucent();
+        sh.somfic.wherestherum.Wakes.LOG.info(
+            "Wakes: chunk shader bound — translucent={} time={} cam={} weather={} depth={}",
+            translucent,
+            this.wakes$uniformTime != null,
+            this.wakes$uniformCam != null,
+            this.wakes$uniformWeather != null,
+            this.wakes$uniformDepth != null);
     }
 
     @Inject(method = "setupState", at = @At("TAIL"))
